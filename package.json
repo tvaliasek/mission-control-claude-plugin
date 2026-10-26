@@ -1,9 +1,28 @@
 {
   "name": "mission-control-claude-plugin",
-  "version": "0.0.0",
-  "private": true,
-  "description": "Build and test tooling for the mission-control Claude Code plugin",
+  "version": "0.1.0",
+  "description": "Interactive setup that connects Claude Code or GitHub Copilot CLI to a self-hosted Mission Control instance",
+  "keywords": [
+    "agents",
+    "claude-code",
+    "copilot-cli",
+    "mcp",
+    "mission-control"
+  ],
+  "homepage": "https://github.com/tvaliasek/mission-control-claude-plugin#readme",
+  "bugs": "https://github.com/tvaliasek/mission-control-claude-plugin/issues",
   "license": "MIT",
+  "author": "Tomáš Valiašek (https://github.com/tvaliasek)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tvaliasek/mission-control-claude-plugin.git"
+  },
+  "bin": {
+    "mission-control-claude-plugin": "dist/setup.cjs"
+  },
+  "files": [
+    "dist/setup.cjs"
+  ],
   "type": "module",
   "scripts": {
     "build": "rslib build",
@@ -24,6 +43,6 @@
     "ultracite": "8.1.0"
   },
   "engines": {
-    "node": ">=24"
+    "node": ">=18"
   }
 }
