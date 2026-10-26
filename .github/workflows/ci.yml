@@ -32,6 +32,11 @@ jobs:
         run: |
           npm run vendor
           test -z "$(git status --porcelain -- plugins/ upstream.json)" || { git status --short; exit 1; }
+      - name: npm package contains only the setup CLI
+        run: |
+          files=$(npm pack --dry-run --json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s)[0].files.map(f=>f.path).sort().join(" ")))')
+          echo "$files"
+          test "$files" = "LICENSE README.md dist/setup.cjs package.json"
       - name: Validate marketplace and plugin manifests
         run: |
           npx --yes @anthropic-ai/claude-code@2.1.310 plugin validate --strict .

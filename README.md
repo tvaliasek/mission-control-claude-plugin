@@ -12,10 +12,28 @@ Not an official Builderz Labs project.
 ## Requirements
 
 - Claude Code with plugin support, or GitHub Copilot CLI (tested with 1.0.103)
-- Node.js 18 or later on that machine (the MCP server uses built-in `fetch`; no npm dependencies)
+- Node.js 18 or later on that machine (the MCP server and setup use built-in `fetch`; no npm dependencies)
 - A Mission Control instance reachable over HTTP(S) from that machine, and an API key for it
 
-## Install
+## Quick setup
+
+```bash
+npx mission-control-claude-plugin
+```
+
+The setup asks which of the installed clients (Claude Code, GitHub Copilot CLI) to set up, then for the Mission Control URL and an agent name. It installs the plugin, then gets an agent key in one of two ways:
+
+- **Issue a new key** (default): you type the Mission Control admin API key once, without echo. It is used to register the agent and issue an `operator`-scoped key for it (90 days), and it is never stored. See [Choosing an API key](#choosing-an-api-key) for what that key can do.
+- **Paste an existing agent key**, for example one issued with `mc-enroll --print` on another machine. The setup checks that Mission Control accepts it.
+
+Then:
+
+- **Claude Code:** the URL, key and agent name are saved in the plugin configuration (key in secure storage). Start a new session.
+- **Copilot CLI:** the `export` lines for `MC_URL`, `MC_API_KEY` and `MC_AGENT_NAME` are printed. The setup does not write them anywhere; put them where you keep secrets.
+
+Keys can also come from `MC_ADMIN_API_KEY` or `MC_API_KEY` in the environment instead of being typed. The package is published from this repository by GitHub Actions with an [npm provenance](https://docs.npmjs.com/generating-provenance-statements) attestation. Check it with `npm view mission-control-claude-plugin --json`, or pin a version: `npx mission-control-claude-plugin@0.1.0`.
+
+## Manual install in Claude Code
 
 ```bash
 claude plugin marketplace add tvaliasek/mission-control-claude-plugin
@@ -36,7 +54,7 @@ To change them later, run `/plugin configure mission-control@mission-control` in
 
 Check the connection by asking Claude to "connect to Mission Control", or run `/mcp` and confirm `mission-control` is connected.
 
-## Install in GitHub Copilot CLI
+## Manual install in GitHub Copilot CLI
 
 ```bash
 copilot plugin marketplace add tvaliasek/mission-control-claude-plugin
@@ -57,7 +75,7 @@ How it works: `.mcp.json` passes both the Claude Code values (`${user_config.*}`
 
 ## Choosing an API key
 
-The server's global `API_KEY` authenticates as **admin**: an agent holding it can manage users, backups and every other agent. Give each machine an agent-scoped key instead. `scripts/mc-enroll.cjs` (Node 18+, no dependencies) uses the admin key once to register the agent and issue it a key with the `operator` scope; the admin key is read from `MC_ADMIN_API_KEY` or a hidden prompt and never stored.
+The server's global `API_KEY` authenticates as **admin**: an agent holding it can manage users, backups and every other agent. Give each machine an agent-scoped key instead. The [quick setup](#quick-setup) does this for you. To keep the admin key off the agent machine, use `scripts/mc-enroll.cjs` (Node 18+, no dependencies) uses the admin key once to register the agent and issue it a key with the `operator` scope; the admin key is read from `MC_ADMIN_API_KEY` or a hidden prompt and never stored.
 
 **Recommended: enroll from a trusted workstation**, so the admin key never touches the agent machine:
 
@@ -97,7 +115,16 @@ npm run fix            # apply lint and format fixes
 npm run vendor         # re-vendor the upstream tag in upstream.json; `-- v2.4.0` or `-- --latest` to change it
 ```
 
-The tests run against the built files in `plugins/mission-control/scripts/`, the files users get, so `npm test` needs a prior `npm run build`.
+The tests run against the built files in `plugins/mission-control/scripts/` and `dist/`, the files users get, so `npm test` needs a prior `npm run build`.
+
+### Releasing
+
+1. Bump `version` in `package.json`, commit, and push a matching tag: `git tag v0.2.0 && git push origin v0.2.0`.
+2. The **Release** workflow checks that the tag matches the version, runs all checks and publishes `mission-control-claude-plugin` to npm through [trusted publishing](https://docs.npmjs.com/trusted-publishers), with provenance and no stored npm token.
+
+The trusted publisher is configured in the package's settings on npmjs.com, so the package must exist first: publish the first version manually (`npm run build && npm publish --access public`), then add a trusted publisher for this repository with the workflow file `release.yml`.
+
+The plugin itself is versioned separately in `plugins/mission-control/.claude-plugin/plugin.json`; Claude Code and Copilot CLI read it from the default branch.
 
 ## Layout
 
@@ -108,7 +135,8 @@ plugins/mission-control/                 the plugin as installed
   .mcp.json                              MCP server definition
   scripts/                               build output (mc-enroll.cjs, mc-mcp-launch.cjs) and vendored upstream files
   skills/mission-control/SKILL.md        agent workflow skill
-src/                                     sources of the built scripts
+src/                                     sources of the built scripts and the setup CLI
+dist/setup.cjs                           built setup CLI, published to npm (not committed)
 scripts/vendor-upstream.ts               vendors and patches the upstream MCP server
 test/                                    Rstest tests
 upstream.json                            vendored upstream tag and commit

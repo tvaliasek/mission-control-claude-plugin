@@ -1,0 +1,36 @@
+name: Release
+
+# Publishes the setup CLI to npm when a vX.Y.Z tag is pushed. Uses npm trusted
+# publishing (OIDC): no npm token is stored, and npm attaches a provenance attestation
+# linking the package to this workflow run. Configure the trusted publisher on
+# npmjs.com with this repository and the workflow file name "release.yml".
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          # no dependency cache in release builds
+          package-manager-cache: false
+      - name: Tag matches package.json version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: test "$TAG" = "v$(node -p 'require("./package.json").version')"
+      - run: npm ci
+      - run: npm run check
+      - name: Committed plugin build output matches the sources
+        run: test -z "$(git status --porcelain -- plugins/)" || { git status --short; exit 1; }
+      - run: npm publish --access public

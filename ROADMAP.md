@@ -4,6 +4,7 @@
 
 - TypeScript toolchain: TypeScript 6, Ultracite (Oxlint + Oxfmt), Rstest, Rslib build of `mc-enroll` into one readable, committed `.cjs`. CI checks that the committed output matches a fresh build.
 - Automatic re-vendoring of the upstream MCP server on each Mission Control release (`.github/workflows/upstream.yml`).
+- Interactive setup: `npx mission-control-claude-plugin`, published to npm with provenance from `.github/workflows/release.yml`.
 - GitHub Copilot CLI support: the launcher falls back to `MC_URL` / `MC_API_KEY` from the environment because Copilot has no plugin configuration (verified with Copilot CLI 1.0.103).
 
 ## Ideas
