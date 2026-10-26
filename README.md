@@ -63,30 +63,36 @@ The default key scopes (`viewer`, `agent:self`) resolve to the read-only viewer 
 
 ## Compatibility
 
-The MCP server is vendored from Mission Control **v2.3.0** (commit `a61ebbfb5a5bf28a8d6345c4d07134a6c3beac52`) with one patch, marked in `loadConfig`: when `MC_URL` is set (always, under this plugin) it ignores `~/.mission-control/profiles/default.json`. Upstream falls back to a session cookie saved there by `mc-cli login`, and Mission Control checks that cookie before the API key, so the agent would act as the logged-in user and send the cookie to whatever URL is configured. Tools that call endpoints missing from older Mission Control versions return an HTTP error; newer versions may expose tools this copy lacks.
+The MCP server is vendored unchanged from Mission Control except for one patch, marked in `loadConfig`: when `MC_URL` is set (always, under this plugin) it ignores `~/.mission-control/profiles/default.json`. Upstream falls back to a session cookie saved there by `mc-cli login`, and Mission Control checks that cookie before the API key, so the agent would act as the logged-in user and send the cookie to whatever URL is configured. Tools that call endpoints missing from older Mission Control versions return an HTTP error; newer versions may expose tools this copy lacks.
 
-To update the vendored files to another tag:
+The vendored version is recorded in [`upstream.json`](upstream.json). The **Upstream release** workflow checks daily for a new Mission Control release. When there is one, it re-vendors the files at that release's commit, re-applies the patch, bumps the plugin's patch version so installed plugins update, runs all checks, and opens a pull request. If upstream changed the patched code, the workflow fails rather than shipping an unpatched server. Pull requests opened with the default `GITHUB_TOKEN` do not trigger CI. To have CI run on them, set an `UPSTREAM_PR_TOKEN` secret (a fine-grained PAT with contents and pull-request write access).
+
+## Development
+
+Requires Node.js 24+. Plugins are installed straight from git without a build step, so the build output in `plugins/mission-control/scripts/` is committed. CI fails if it differs from a fresh build.
 
 ```bash
-TAG=v2.3.0
-for f in mc-mcp-server.cjs mc-base-url.cjs; do
-  curl -fsSL "https://raw.githubusercontent.com/builderz-labs/mission-control/$TAG/scripts/$f" \
-    -o "plugins/mission-control/scripts/$f"
-done
+npm ci
+npm run check          # typecheck, lint (Ultracite: Oxlint + Oxfmt), build (Rslib), tests (Rstest)
+npm run fix            # apply lint and format fixes
+npm run vendor         # re-vendor the upstream tag in upstream.json; `-- v2.4.0` or `-- --latest` to change it
 ```
 
-Then re-apply the `loadConfig` patch, update the tag and commit above, bump `version` in `plugins/mission-control/.claude-plugin/plugin.json`, and run `claude plugin validate .`.
+The tests run against the built `mc-enroll.cjs`, the file users download, so `npm test` needs a prior `npm run build`.
 
 ## Layout
 
 ```
 .claude-plugin/marketplace.json          marketplace catalog
-plugins/mission-control/
+plugins/mission-control/                 the plugin as installed
   .claude-plugin/plugin.json             manifest and user configuration
   .mcp.json                              MCP server definition
-  scripts/                               vendored upstream MCP server (MIT), mc-enroll.cjs
+  scripts/                               build output (mc-enroll.cjs) and vendored upstream files
   skills/mission-control/SKILL.md        agent workflow skill
-test/                                    node --test test/
+src/mc-enroll.ts                         source of scripts/mc-enroll.cjs
+scripts/vendor-upstream.ts               vendors and patches the upstream MCP server
+test/                                    Rstest tests
+upstream.json                            vendored upstream tag and commit
 ```
 
 ## License

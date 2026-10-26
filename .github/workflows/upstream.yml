@@ -1,0 +1,62 @@
+name: Upstream release
+
+# Re-vendors the Mission Control MCP server when upstream publishes a release
+# and opens a pull request with the rebuilt plugin.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag to vendor, e.g. v2.4.0 (default: latest release)"
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-release
+  cancel-in-progress: false
+
+jobs:
+  vendor:
+    runs-on: ubuntu-latest
+    env:
+      # PRs opened with the default token do not trigger CI; set UPSTREAM_PR_TOKEN
+      # (fine-grained PAT: contents + pull requests) to have CI run on them.
+      GH_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN || github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ secrets.UPSTREAM_PR_TOKEN || github.token }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - id: vendor
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: node scripts/vendor-upstream.ts "${TAG:---latest}"
+      - if: steps.vendor.outputs.changed == 'true'
+        run: npm run check
+      - if: steps.vendor.outputs.changed == 'true'
+        env:
+          TAG: ${{ steps.vendor.outputs.tag }}
+        run: |
+          branch="upstream/${TAG}"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "Branch $branch already exists; not opening another PR."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add -A plugins/ upstream.json
+          git commit -m "Vendor Mission Control ${TAG} MCP server"
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "Vendor Mission Control ${TAG}" \
+            --body "Re-vendors scripts/mc-mcp-server.cjs and mc-base-url.cjs from builderz-labs/mission-control ${TAG}, re-applies the loadConfig patch and bumps the plugin version. Review the upstream diff for new tools or changed endpoints before merging."
