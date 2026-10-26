@@ -10,7 +10,10 @@ import path from "node:path";
 export const ADMIN_KEY = "admin-test-key";
 export const ISSUED_KEY = "mca_agentkey";
 export const EXISTING_AGENT_KEY = "mca_existing";
+// the agent EXISTING_AGENT_KEY belongs to
+export const KEY_OWNER = "build-box";
 const AGENT_ROUTE_RE = /^\/api\/agents\/(?<name>[^/]+)$/u;
+const AGENT_KEYS_ROUTE_RE = /^\/api\/agents\/[^/]+\/keys$/u;
 
 export const builtScript = (...parts: string[]) =>
   path.join(import.meta.dirname, "..", ...parts);
@@ -35,8 +38,66 @@ const send = (res: ServerResponse, status: number, body: unknown) => {
   res.end(JSON.stringify(body));
 };
 
-// Mock of the Mission Control v2.3.0 endpoints the scripts call. The admin key may
-// do everything; EXISTING_AGENT_KEY may only read agents.
+// Write endpoints, which only the admin key may use.
+const respondAdmin = (
+  route: string,
+  res: ServerResponse,
+  body: Record<string, unknown>,
+  existingAgents: string[]
+) => {
+  if (route === "POST /api/agents/register") {
+    const exists = existingAgents.includes(String(body.name));
+    send(res, exists ? 200 : 201, {
+      agent: { id: 7, name: body.name },
+      registered: !exists,
+    });
+  } else if (route === "POST /api/agents/7/keys") {
+    send(res, 201, {
+      api_key: ISSUED_KEY,
+      key: { id: 3, key_prefix: "mca_abcdef12" },
+    });
+  } else {
+    send(res, 404, {});
+  }
+};
+
+// Answers one request the way Mission Control v2.3.0 would for these endpoints.
+// The admin key may do everything; EXISTING_AGENT_KEY may only read agents and,
+// like Mission Control, is rejected when x-agent-name names another agent.
+const respond = (
+  req: IncomingMessage,
+  res: ServerResponse,
+  body: Record<string, unknown>,
+  existingAgents: string[]
+) => {
+  const key = req.headers["x-api-key"];
+  const route = `${req.method} ${req.url}`;
+  const agentHeader = req.headers["x-agent-name"];
+  const knownKey = key === ADMIN_KEY || key === EXISTING_AGENT_KEY;
+  const wrongAgent =
+    key === EXISTING_AGENT_KEY && agentHeader && agentHeader !== KEY_OWNER;
+  if (!knownKey || wrongAgent) {
+    send(res, 401, { error: "Authentication required" });
+    return;
+  }
+  if (req.method === "GET" && AGENT_KEYS_ROUTE_RE.test(req.url ?? "")) {
+    send(res, key === ADMIN_KEY ? 200 : 403, { keys: [] });
+    return;
+  }
+  const lookup = req.method === "GET" && AGENT_ROUTE_RE.exec(req.url ?? "");
+  if (lookup) {
+    const name = decodeURIComponent(lookup.groups?.name ?? "");
+    const exists = existingAgents.includes(name);
+    send(res, exists ? 200 : 404, exists ? { agent: { id: 7, name } } : {});
+    return;
+  }
+  if (key === ADMIN_KEY) {
+    respondAdmin(route, res, body, existingAgents);
+  } else {
+    send(res, 403, { error: "Forbidden" });
+  }
+};
+
 export const startMissionControl = async ({
   existingAgents = [] as string[],
   handler,
@@ -52,47 +113,16 @@ export const startMissionControl = async ({
     });
     req.on("end", () => {
       const body = (raw ? JSON.parse(raw) : {}) as Record<string, unknown>;
-      const key = req.headers["x-api-key"] as string | undefined;
       requests.push({
         body,
-        key,
+        key: req.headers["x-api-key"] as string | undefined,
         method: req.method ?? "",
         url: req.url ?? "",
       });
       res.setHeader("Content-Type", "application/json");
-      if (handler?.(req, res)) {
-        return;
+      if (!handler?.(req, res)) {
+        respond(req, res, body, existingAgents);
       }
-      const lookup = req.method === "GET" && AGENT_ROUTE_RE.exec(req.url ?? "");
-      if (lookup && (key === ADMIN_KEY || key === EXISTING_AGENT_KEY)) {
-        const name = decodeURIComponent(lookup.groups?.name ?? "");
-        if (existingAgents.includes(name)) {
-          send(res, 200, { agent: { id: 7, name } });
-        } else {
-          send(res, 404, { error: "Agent not found" });
-        }
-        return;
-      }
-      if (key !== ADMIN_KEY) {
-        send(res, 401, { error: "Authentication required" });
-        return;
-      }
-      if (req.method === "POST" && req.url === "/api/agents/register") {
-        const exists = existingAgents.includes(String(body.name));
-        send(res, exists ? 200 : 201, {
-          agent: { id: 7, name: body.name },
-          registered: !exists,
-        });
-        return;
-      }
-      if (req.method === "POST" && req.url === "/api/agents/7/keys") {
-        send(res, 201, {
-          api_key: ISSUED_KEY,
-          key: { id: 3, key_prefix: "mca_abcdef12" },
-        });
-        return;
-      }
-      send(res, 404, {});
     });
   });
   server.listen(0, "127.0.0.1");

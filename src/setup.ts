@@ -112,6 +112,7 @@ const obtainKey = async (
         `Agent "${agent}" already exists. Issue another key for it?`,
         false
       ),
+    existingHint: "",
     expiresDays: KEY_EXPIRES_DAYS,
     framework: clients.claude ? "claude-code" : "copilot-cli",
     keyName: hostname(),
@@ -169,12 +170,14 @@ const main = async () => {
     });
     if (error) {
       // a newly issued key exists server-side now; print it so it is not lost
-      log(`${error}\nconfigure ${PLUGIN_ID} manually with this key:`);
+      log(
+        `${error}\nconfigure ${PLUGIN_ID} in Claude Code manually with this key:`
+      );
       process.stdout.write(`${agentKey}\n`);
       process.exitCode = 1;
-      return;
+    } else {
+      log("Claude Code: start a new session to use Mission Control");
     }
-    log("Claude Code: start a new session to use Mission Control");
   }
   if (clients.copilot) {
     printCopilotEnv(url, agentKey, agent);

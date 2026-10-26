@@ -75,20 +75,57 @@ describe("setup", () => {
         `copilot plugin marketplace add ${MARKETPLACE}`,
         `copilot plugin install ${PLUGIN}`,
       ]);
-      // the pasted key is verified with a read-only request, nothing is issued
-      expect(mc.requests).toEqual([
-        {
-          body: {},
-          key: EXISTING_AGENT_KEY,
-          method: "GET",
-          url: "/api/agents/build-box",
-        },
+      // the pasted key is verified with read-only requests, nothing is issued
+      expect(mc.requests.map((q) => `${q.method} ${q.url} ${q.key}`)).toEqual([
+        `GET /api/agents/build-box ${EXISTING_AGENT_KEY}`,
+        `GET /api/agents/build-box/keys ${EXISTING_AGENT_KEY}`,
       ]);
       expect(r.stderr).toMatch(/key accepted/u);
     } finally {
       mc.close();
     }
   });
+
+  test.each([
+    [
+      "a key of another agent",
+      EXISTING_AGENT_KEY,
+      "other-box",
+      ["other-box"],
+      /HTTP 401/u,
+    ],
+    [
+      "an admin key",
+      ADMIN_KEY,
+      "build-box",
+      ["build-box"],
+      /this is an admin key/u,
+    ],
+    [
+      "a key for a missing agent",
+      EXISTING_AGENT_KEY,
+      "build-box",
+      [],
+      /has no agent "build-box"/u,
+    ],
+  ])(
+    "rejects a pasted key that is %s",
+    async (_case, key, agent, existing, message) => {
+      const mc = await startMissionControl({ existingAgents: existing });
+      const bins = fakeBins(["copilot"]);
+      try {
+        const r = await runScript(SETUP, [], {
+          env: { MC_API_KEY: key, PATH: bins.dir },
+          input: answers("y", mc.url, agent, "n"),
+        });
+        expect(r.code).toBe(1);
+        expect(r.stderr).toMatch(message);
+        expect(r.stdout).toBe("");
+      } finally {
+        mc.close();
+      }
+    }
+  );
 
   test("accepts a Copilot marketplace that is already registered", async () => {
     const mc = await startMissionControl({ existingAgents: ["build-box"] });
@@ -159,6 +196,24 @@ describe("setup", () => {
       });
       expect(r.code).toBe(1);
       expect(r.stdout).toBe(`${ISSUED_KEY}\n`);
+    } finally {
+      mc.close();
+    }
+  });
+
+  test("still prints the Copilot exports when configuring Claude Code fails", async () => {
+    const mc = await startMissionControl();
+    const bins = fakeBins(["claude", "copilot"], {
+      exitCodes: { "claude plugin configure": 3 },
+    });
+    try {
+      const r = await runScript(SETUP, [], {
+        env: { MC_ADMIN_API_KEY: ADMIN_KEY, PATH: bins.dir },
+        input: answers("y", "y", mc.url, "build-box", "y"),
+      });
+      expect(r.code).toBe(1);
+      expect(r.stdout).toContain(`${ISSUED_KEY}\n`);
+      expect(r.stdout).toContain(`export MC_API_KEY='${ISSUED_KEY}'`);
     } finally {
       mc.close();
     }

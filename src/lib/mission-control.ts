@@ -60,7 +60,8 @@ const api = async (
   apiKey: string,
   method: string,
   route: string,
-  body?: unknown
+  body?: unknown,
+  agentName?: string
 ): Promise<ApiResult> => {
   let res: Response;
   try {
@@ -70,6 +71,8 @@ const api = async (
         Accept: "application/json",
         "Content-Type": "application/json",
         "x-api-key": apiKey,
+        // makes Mission Control reject an agent key that belongs to another agent
+        ...(agentName ? { "x-agent-name": agentName } : {}),
       },
       method,
       // following a redirect would send the key to the redirect target
@@ -121,6 +124,8 @@ export interface EnrollOptions {
   expiresDays: number;
   // asked only when the agent already exists; issuing it a key is otherwise refused
   allowExisting: () => Promise<boolean>;
+  // appended to the refusal, e.g. how to allow it
+  existingHint: string;
 }
 
 // Registers the agent with the admin key and issues it an operator-scoped key.
@@ -131,7 +136,9 @@ export const enrollAgent = async (opts: EnrollOptions): Promise<string> => {
   if (lookup.status !== HTTP_NOT_FOUND) {
     checked("GET", agentRoute, lookup);
     if (!(await opts.allowExisting())) {
-      fail(`agent "${opts.agent}" already exists; not issuing it another key`);
+      fail(
+        `agent "${opts.agent}" already exists; not issuing it another key${opts.existingHint}`
+      );
     }
   }
 
@@ -172,16 +179,24 @@ export const enrollAgent = async (opts: EnrollOptions): Promise<string> => {
   return issued.api_key;
 };
 
-// Checks that Mission Control accepts the key, using a read-only request.
+// Checks that the key is an agent key of this agent: Mission Control rejects an
+// agent key whose agent differs from x-agent-name, and only an admin key can list
+// an agent's keys.
 export const verifyKey = async (url: string, key: string, agent: string) => {
   const route = `/api/agents/${encodeURIComponent(agent)}`;
-  const result = await api(url, key, "GET", route);
+  const result = await api(url, key, "GET", route, undefined, agent);
   if (result.status === HTTP_NOT_FOUND) {
-    log(
-      `warning: Mission Control accepted the key but has no agent "${agent}" yet; it is created on first connect`
+    fail(
+      `Mission Control has no agent "${agent}"; an agent key belongs to an existing agent, check the name`
     );
-    return;
   }
   checked("GET", route, result);
+  const keysRoute = `${route}/keys`;
+  const asAdmin = await api(url, key, "GET", keysRoute);
+  if (asAdmin.ok) {
+    fail(
+      "this is an admin key; give the agent an agent-scoped key (answer yes to issuing a new key)"
+    );
+  }
   log(`key accepted for agent "${agent}"`);
 };

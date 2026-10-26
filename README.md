@@ -31,7 +31,7 @@ Then:
 - **Claude Code:** the URL, key and agent name are saved in the plugin configuration (key in secure storage). Start a new session.
 - **Copilot CLI:** the `export` lines for `MC_URL`, `MC_API_KEY` and `MC_AGENT_NAME` are printed. The setup does not write them anywhere; put them where you keep secrets.
 
-Keys can also come from `MC_ADMIN_API_KEY` or `MC_API_KEY` in the environment instead of being typed. The package is published from this repository by GitHub Actions with an [npm provenance](https://docs.npmjs.com/generating-provenance-statements) attestation. Check it with `npm view mission-control-claude-plugin --json`, or pin a version: `npx mission-control-claude-plugin@0.1.0`.
+Keys can also come from `MC_ADMIN_API_KEY` or `MC_API_KEY` in the environment instead of being typed. Releases after 0.1.0 are published from this repository by GitHub Actions with an [npm provenance](https://docs.npmjs.com/generating-provenance-statements) attestation; 0.1.0 itself is published manually and has none. Check signatures and provenance with `npm audit signatures` in a project that depends on the package, and pin a version (`npx mission-control-claude-plugin@<version>`) rather than running whatever is latest.
 
 ## Manual install in Claude Code
 
@@ -75,7 +75,7 @@ How it works: `.mcp.json` passes both the Claude Code values (`${user_config.*}`
 
 ## Choosing an API key
 
-The server's global `API_KEY` authenticates as **admin**: an agent holding it can manage users, backups and every other agent. Give each machine an agent-scoped key instead. The [quick setup](#quick-setup) does this for you. To keep the admin key off the agent machine, use `scripts/mc-enroll.cjs` (Node 18+, no dependencies) uses the admin key once to register the agent and issue it a key with the `operator` scope; the admin key is read from `MC_ADMIN_API_KEY` or a hidden prompt and never stored.
+The server's global `API_KEY` authenticates as **admin**: an agent holding it can manage users, backups and every other agent. Give each machine an agent-scoped key instead. The [quick setup](#quick-setup) does this for you. To keep the admin key off the agent machine, use `scripts/mc-enroll.cjs` (Node 18+, no dependencies) instead. It uses the admin key once to register the agent and issue it a key with the `operator` scope; the admin key is read from `MC_ADMIN_API_KEY` or a hidden prompt and never stored.
 
 **Recommended: enroll from a trusted workstation**, so the admin key never touches the agent machine:
 
@@ -120,9 +120,9 @@ The tests run against the built files in `plugins/mission-control/scripts/` and 
 ### Releasing
 
 1. Bump `version` in `package.json`, commit, and push a matching tag: `git tag v0.2.0 && git push origin v0.2.0`.
-2. The **Release** workflow checks that the tag matches the version, runs all checks and publishes `mission-control-claude-plugin` to npm through [trusted publishing](https://docs.npmjs.com/trusted-publishers), with provenance and no stored npm token.
+2. The **Release** workflow checks that the tagged commit is on `main` and matches the version, runs all checks in a job without publish credentials, then a separate job (GitHub environment `npm`) publishes the tested build `mission-control-claude-plugin` to npm through [trusted publishing](https://docs.npmjs.com/trusted-publishers), with provenance and no stored npm token.
 
-The trusted publisher is configured in the package's settings on npmjs.com, so the package must exist first: publish the first version manually (`npm run build && npm publish --access public`), then add a trusted publisher for this repository with the workflow file `release.yml`.
+The trusted publisher is configured in the package's settings on npmjs.com, so the package must exist first: publish the first version manually (`npm run build && npm publish --access public`), then add a trusted publisher for this repository with the workflow file `release.yml` and the environment `npm`. The first publish through it must happen within 2 days. Adding required reviewers to the `npm` environment in the repository settings makes every release wait for approval.
 
 The plugin itself is versioned separately in `plugins/mission-control/.claude-plugin/plugin.json`; Claude Code and Copilot CLI read it from the default branch.
 

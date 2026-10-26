@@ -14,43 +14,94 @@ const setProgram = (name)=>{
 const cli_log = (message)=>{
     process.stderr.write(`${program}: ${message}\n`);
 };
-const fail = (message)=>{
+const cli_fail = (message)=>{
     cli_log(message);
     process.exit(1);
+};
+// Characters typed or pasted after a line ending, kept for the next prompt.
+let pending = [];
+// Escape sequences such as arrow keys (ESC [ D) are dropped: after ESC, a [ or O
+// starts a sequence that ends with a letter or ~; anything else ends it at once.
+const NO_ESCAPE = 0;
+const AFTER_ESC = 1;
+const IN_SEQUENCE = 2;
+const SEQUENCE_END_RE = /[A-Za-z~]/u;
+const abortInput = (stdin, code, message)=>{
+    stdin.setRawMode(false);
+    process.stderr.write("\n");
+    if (message) {
+        cli_log(message);
+    }
+    process.exit(code);
+};
+// Applies one character; returns true when the line is complete.
+const applyChar = (stdin, state, ch, echo)=>{
+    if (state.escape === AFTER_ESC) {
+        state.escape = ch === "[" || ch === "O" ? IN_SEQUENCE : NO_ESCAPE;
+        return false;
+    }
+    if (state.escape === IN_SEQUENCE) {
+        state.escape = SEQUENCE_END_RE.test(ch) ? NO_ESCAPE : IN_SEQUENCE;
+        return false;
+    }
+    if (ch === "\r" || ch === "\n") {
+        return true;
+    }
+    if (ch === "\u0003") {
+        abortInput(stdin, SIGINT_EXIT_CODE);
+    }
+    if (ch === "\u0004") {
+        abortInput(stdin, 1, "input ended; setup aborted");
+    }
+    if (ch === "\u001B") {
+        state.escape = AFTER_ESC;
+    } else if (ch === "\u007F" || ch === "\b") {
+        if (echo && state.input.length > 0) {
+            process.stderr.write(ERASE_CHAR);
+        }
+        state.input.pop();
+    } else if (ch >= " ") {
+        if (echo) {
+            process.stderr.write(ch);
+        }
+        state.input.push(ch);
+    }
+    return false;
 };
 // Reads one line from a raw-mode terminal, echoing it unless it is a secret.
 // Hidden and visible questions share this reader: a readline interface in between
 // left stdin in a state where the next raw read never received input.
 const readLine = async (stdin, echo)=>{
-    let input = "";
+    const state = {
+        escape: NO_ESCAPE,
+        input: []
+    };
+    const consume = (chars)=>{
+        for(let i = 0; i < chars.length; i += 1){
+            if (applyChar(stdin, state, chars[i] ?? "", echo)) {
+                pending = chars.slice(i + 1);
+                return true;
+            }
+        }
+        return false;
+    };
+    const leftover = pending;
+    pending = [];
+    if (consume(leftover)) {
+        return state.input.join("");
+    }
     // stdin ending (terminal closed) also ends the loop. Without destroyOnReturn: false,
     // returning early destroys stdin and Node 18 then can't leave raw mode.
     for await (const chunk of stdin.iterator({
         destroyOnReturn: false
     })){
-        for (const ch of chunk){
-            if (ch === "\r" || ch === "\n" || ch === "\u0004") {
-                return input;
-            }
-            if (ch === "\u0003") {
-                stdin.setRawMode(false);
-                process.stderr.write("\n");
-                process.exit(SIGINT_EXIT_CODE);
-            }
-            if (ch === "\u007F" || ch === "\b") {
-                if (echo && input) {
-                    process.stderr.write(ERASE_CHAR);
-                }
-                input = input.slice(0, -1);
-            } else if (ch >= " ") {
-                if (echo) {
-                    process.stderr.write(ch);
-                }
-                input += ch;
-            }
+        if (consume([
+            ...chunk
+        ])) {
+            return state.input.join("");
         }
     }
-    return input;
+    return abortInput(stdin, 1, "input ended; setup aborted");
 };
 const promptTerminal = async (question, echo)=>{
     const { stdin } = process;
@@ -70,7 +121,7 @@ const promptTerminal = async (question, echo)=>{
 // is the only way in, so the error names it.
 const promptHidden = (question, envName)=>{
     if (!process.stdin.isTTY) {
-        return fail(`no terminal to prompt for a key; set ${envName} instead`);
+        return cli_fail(`no terminal to prompt for a key; set ${envName} instead`);
     }
     return promptTerminal(question, false);
 };
@@ -109,7 +160,7 @@ const guardUnfinished = ()=>{
     let finished = false;
     process.on("beforeExit", ()=>{
         if (!finished) {
-            fail("input ended before setup finished");
+            cli_fail("input ended before setup finished");
         }
     });
     return ()=>{
@@ -227,10 +278,10 @@ const isValidAgentName = (name)=>NAME_RE.test(name) && !DIGITS_RE.test(name);
 const AGENT_NAME_RULES = "1-63 letters, digits, dots, hyphens or underscores, starting with a letter or digit, not only digits";
 const checkKey = (key, what)=>{
     if (!key) {
-        fail(`${what} is empty`);
+        cli_fail(`${what} is empty`);
     }
     if (!KEY_RE.test(key)) {
-        fail(`${what} contains invalid characters`);
+        cli_fail(`${what} contains invalid characters`);
     }
     return key;
 };
@@ -240,23 +291,23 @@ const normalizeUrl = (value)=>{
     try {
         parsed = new URL(value.trim());
     } catch  {
-        return fail("Mission Control URL must be an absolute HTTP(S) URL");
+        return cli_fail("Mission Control URL must be an absolute HTTP(S) URL");
     }
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-        fail("Mission Control URL must use HTTP or HTTPS");
+        cli_fail("Mission Control URL must use HTTP or HTTPS");
     }
     if (parsed.username || parsed.password) {
-        fail("Mission Control URL must not contain credentials");
+        cli_fail("Mission Control URL must not contain credentials");
     }
     if (parsed.search || parsed.hash) {
-        fail("Mission Control URL must not contain a query string or fragment");
+        cli_fail("Mission Control URL must not contain a query string or fragment");
     }
     if (parsed.protocol === "http:" && !LOCAL_HOSTS.has(parsed.hostname)) {
         cli_log("warning: plain HTTP sends API keys unencrypted");
     }
     return parsed.toString().replace(TRAILING_SLASHES_RE, "");
 };
-const api = async (baseUrl, apiKey, method, route, body)=>{
+const api = async (baseUrl, apiKey, method, route, body, agentName)=>{
     let res;
     try {
         res = await fetch(`${baseUrl}${route}`, {
@@ -264,7 +315,11 @@ const api = async (baseUrl, apiKey, method, route, body)=>{
             headers: {
                 Accept: "application/json",
                 "Content-Type": "application/json",
-                "x-api-key": apiKey
+                "x-api-key": apiKey,
+                // makes Mission Control reject an agent key that belongs to another agent
+                ...agentName ? {
+                    "x-agent-name": agentName
+                } : {}
             },
             method,
             // following a redirect would send the key to the redirect target
@@ -274,7 +329,7 @@ const api = async (baseUrl, apiKey, method, route, body)=>{
     } catch (error) {
         // fetch error messages can contain header values, so report only the cause code
         const err = error ?? {};
-        return fail(`${method} ${route} failed: ${err.cause?.code ?? err.name ?? "network error"} (redirects are not followed)`);
+        return cli_fail(`${method} ${route} failed: ${err.cause?.code ?? err.name ?? "network error"} (redirects are not followed)`);
     }
     const text = await res.text();
     let data = {};
@@ -292,7 +347,7 @@ const api = async (baseUrl, apiKey, method, route, body)=>{
 const checked = (method, route, result)=>{
     if (!result.ok) {
         const detail = typeof result.data.error === "string" ? ` ${result.data.error}` : "";
-        fail(`${method} ${route} failed: HTTP ${result.status}${detail}`);
+        cli_fail(`${method} ${route} failed: HTTP ${result.status}${detail}`);
     }
     return result.data;
 };
@@ -304,7 +359,7 @@ const enrollAgent = async (opts)=>{
     if (lookup.status !== HTTP_NOT_FOUND) {
         checked("GET", agentRoute, lookup);
         if (!await opts.allowExisting()) {
-            fail(`agent "${opts.agent}" already exists; not issuing it another key`);
+            cli_fail(`agent "${opts.agent}" already exists; not issuing it another key${opts.existingHint}`);
         }
     }
     const registerRoute = "/api/agents/register";
@@ -314,7 +369,7 @@ const enrollAgent = async (opts)=>{
     }));
     const agentId = reg.agent?.id;
     if (agentId === undefined || agentId === null) {
-        fail(`unexpected response from ${registerRoute}`);
+        cli_fail(`unexpected response from ${registerRoute}`);
     }
     cli_log(`agent "${reg.agent?.name}" ${reg.registered ? "registered" : "exists"} (id ${agentId})`);
     // operator is the lowest role that can connect, heartbeat, poll the queue and update tasks
@@ -327,20 +382,26 @@ const enrollAgent = async (opts)=>{
         ]
     }));
     if (!issued.api_key) {
-        return fail("unexpected response from the key endpoint");
+        return cli_fail("unexpected response from the key endpoint");
     }
     cli_log(`issued key ${issued.key?.key_prefix ?? ""}… (id ${issued.key?.id ?? "?"}), expires in ${opts.expiresDays} days`);
     return issued.api_key;
 };
-// Checks that Mission Control accepts the key, using a read-only request.
+// Checks that the key is an agent key of this agent: Mission Control rejects an
+// agent key whose agent differs from x-agent-name, and only an admin key can list
+// an agent's keys.
 const verifyKey = async (url, key, agent)=>{
     const route = `/api/agents/${encodeURIComponent(agent)}`;
-    const result = await api(url, key, "GET", route);
+    const result = await api(url, key, "GET", route, undefined, agent);
     if (result.status === HTTP_NOT_FOUND) {
-        log(`warning: Mission Control accepted the key but has no agent "${agent}" yet; it is created on first connect`);
-        return;
+        fail(`Mission Control has no agent "${agent}"; an agent key belongs to an existing agent, check the name`);
     }
     checked("GET", route, result);
+    const keysRoute = `${route}/keys`;
+    const asAdmin = await api(url, key, "GET", keysRoute);
+    if (asAdmin.ok) {
+        fail("this is an admin key; give the agent an agent-scoped key (answer yes to issuing a new key)");
+    }
     log(`key accepted for agent "${agent}"`);
 };
 
@@ -386,7 +447,7 @@ const parseArgs = (argv)=>{
         const value = ()=>{
             const next = argv[i + 1];
             if (next === undefined) {
-                return fail(`${arg} needs a value`);
+                return cli_fail(`${arg} needs a value`);
             }
             i += 1;
             return next;
@@ -431,18 +492,18 @@ const parseArgs = (argv)=>{
                 }
             default:
                 {
-                    fail(`unknown argument: ${arg}`);
+                    cli_fail(`unknown argument: ${arg}`);
                 }
         }
     }
     if (!url) {
-        return fail("--url is required");
+        return cli_fail("--url is required");
     }
     if (!(agent && isValidAgentName(agent))) {
-        return fail(`--agent is required: ${AGENT_NAME_RULES}`);
+        return cli_fail(`--agent is required: ${AGENT_NAME_RULES}`);
     }
     if (!Number.isInteger(opts.expiresDays) || opts.expiresDays < 1 || opts.expiresDays > MAX_EXPIRES_DAYS) {
-        fail(`--expires-days must be an integer between 1 and ${MAX_EXPIRES_DAYS}`);
+        cli_fail(`--expires-days must be an integer between 1 and ${MAX_EXPIRES_DAYS}`);
     }
     return {
         ...opts,
@@ -458,6 +519,7 @@ const main = async ()=>{
         adminKey,
         agent: opts.agent,
         allowExisting: ()=>Promise.resolve(opts.existing),
+        existingHint: "; pass --existing to issue it another key",
         expiresDays: opts.expiresDays,
         framework: "claude-code",
         keyName: opts.keyName,
@@ -482,7 +544,7 @@ const main = async ()=>{
     cli_log(`start a new Claude Code session to use ${PLUGIN_ID}`);
 };
 const mc_enroll_finished = guardUnfinished();
-main().then(mc_enroll_finished).catch(()=>fail("unexpected error"));
+main().then(mc_enroll_finished).catch(()=>cli_fail("unexpected error"));
 
 for(var __rspack_i in __webpack_exports__) {
   exports[__rspack_i] = __webpack_exports__[__rspack_i];

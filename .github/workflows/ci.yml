@@ -45,8 +45,10 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 18
-      - name: Built mc-enroll runs on Node 18
+      - name: Built mc-enroll and setup run on Node 18
         run: |
           node plugins/mission-control/scripts/mc-enroll.cjs --help
           if node plugins/mission-control/scripts/mc-enroll.cjs --agent x 2>"$RUNNER_TEMP/err.txt"; then exit 1; fi
           grep -q -- "--url is required" "$RUNNER_TEMP/err.txt"
+          node dist/setup.cjs </dev/null 2>"$RUNNER_TEMP/setup-err.txt" && exit 1
+          grep -q "neither claude nor copilot" "$RUNNER_TEMP/setup-err.txt"

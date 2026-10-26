@@ -140,6 +140,7 @@ const main = async () => {
     adminKey,
     agent: opts.agent,
     allowExisting: () => Promise.resolve(opts.existing),
+    existingHint: "; pass --existing to issue it another key",
     expiresDays: opts.expiresDays,
     framework: "claude-code",
     keyName: opts.keyName,

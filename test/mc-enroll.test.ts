@@ -65,7 +65,7 @@ describe("mc-enroll", () => {
         "--print",
       ]);
       expect(refused.code).toBe(1);
-      expect(refused.stderr).toMatch(/already exists/u);
+      expect(refused.stderr).toMatch(/already exists.*pass --existing/u);
       // only the read-only lookup may run
       expect(srv.requests.map((q) => q.method)).toEqual(["GET"]);
 
