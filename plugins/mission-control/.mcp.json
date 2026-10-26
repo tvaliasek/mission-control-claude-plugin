@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "mission-control": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mc-mcp-server.cjs"],
+      "env": {
+        "MC_URL": "${user_config.mc_url}",
+        "MC_API_KEY": "${user_config.mc_api_key}"
+      }
+    }
+  }
+}

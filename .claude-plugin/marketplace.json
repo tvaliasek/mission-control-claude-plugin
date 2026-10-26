@@ -1,0 +1,15 @@
+{
+  "name": "mission-control",
+  "description": "Claude Code plugins for connecting agents to a self-hosted Mission Control instance",
+  "owner": {
+    "name": "Tomáš Valiašek",
+    "url": "https://github.com/tvaliasek"
+  },
+  "plugins": [
+    {
+      "name": "mission-control",
+      "source": "./plugins/mission-control",
+      "description": "Connects Claude Code to Mission Control: MCP tools for agents, tasks, runs, costs and knowledge, plus a skill for the agent workflow"
+    }
+  ]
+}

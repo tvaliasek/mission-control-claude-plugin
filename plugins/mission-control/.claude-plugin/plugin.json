@@ -1,0 +1,34 @@
+{
+  "name": "mission-control",
+  "displayName": "Mission Control",
+  "version": "0.1.0",
+  "description": "Connects Claude Code to a self-hosted Mission Control instance (builderz-labs/mission-control) through its MCP server",
+  "author": {
+    "name": "Tomáš Valiašek",
+    "url": "https://github.com/tvaliasek"
+  },
+  "repository": "https://github.com/tvaliasek/mission-control-claude-plugin",
+  "license": "MIT",
+  "keywords": ["mission-control", "agents", "mcp", "orchestration"],
+  "userConfig": {
+    "mc_url": {
+      "type": "string",
+      "title": "Mission Control URL",
+      "description": "Base URL of your Mission Control instance, e.g. https://mc.example.com",
+      "required": true
+    },
+    "mc_api_key": {
+      "type": "string",
+      "title": "Mission Control API key",
+      "description": "Value of API_KEY from the Mission Control server environment",
+      "required": true,
+      "sensitive": true
+    },
+    "agent_name": {
+      "type": "string",
+      "title": "Agent name",
+      "description": "Name this Claude Code instance uses when registering with Mission Control",
+      "default": "claude-code"
+    }
+  }
+}
