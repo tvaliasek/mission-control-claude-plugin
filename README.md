@@ -28,9 +28,9 @@ When the plugin is enabled, Claude Code asks for:
 
 | Option | Description |
 | --- | --- |
-| `mc_url` | Base URL of Mission Control, e.g. `https://mc.example.com`. Must be the hostname listed in the server's `MC_ALLOWED_HOSTS` |
+| `mc_url` | Base URL of Mission Control, e.g. `https://mc.example.com`. If the server sets `MC_ALLOWED_HOSTS`, the hostname must match it |
 | `mc_api_key` | API key. Stored in secure storage, not in `settings.json` |
-| `agent_name` | Agent name this Claude Code registers as (default `claude-code`) |
+| `agent_name` | Unique agent name for this machine. Machines sharing a name share one agent and one task queue |
 
 To change them later, run `/plugin configure mission-control@mission-control` in Claude Code. For unattended setup, pass them at install time: `claude plugin install mission-control@mission-control --config mc_url=https://mc.example.com --config mc_api_key=... --config agent_name=build-box`.
 
@@ -38,24 +38,32 @@ Check the connection by asking Claude to "connect to Mission Control", or run `/
 
 ## Choosing an API key
 
-The server's global `API_KEY` authenticates as **admin**: an agent holding it can manage users, backups and every other agent. Prefer an agent-scoped key for each machine:
+The server's global `API_KEY` authenticates as **admin**: an agent holding it can manage users, backups and every other agent. Give each machine an agent-scoped key instead. `scripts/mc-enroll.cjs` (Node 18+, no dependencies) uses the admin key once to register the agent and issue it a key with the `operator` scope; the admin key is read from `MC_ADMIN_API_KEY` or a hidden prompt and never stored.
 
-1. Create the agent in Mission Control (UI, or let it register once with the global key).
-2. As admin, issue a key for it:
+**Recommended: enroll from a trusted workstation**, so the admin key never touches the agent machine:
 
-   ```bash
-   curl -X POST "$MC_URL/api/agents/<agent-name-or-id>/keys" \
-     -H "x-api-key: $ADMIN_API_KEY" -H "Content-Type: application/json" \
-     -d '{"name":"laptop","scopes":["operator"],"expires_in_days":90}'
-   ```
+```bash
+curl -fsSLO https://raw.githubusercontent.com/tvaliasek/mission-control-claude-plugin/main/plugins/mission-control/scripts/mc-enroll.cjs
+node mc-enroll.cjs --url https://mc.example.com --agent build-box --print
+```
 
-   The response's `api_key` (`mca_…`) is shown once. Use it as `mc_api_key` and set `agent_name` to the same agent.
+It prints only the agent key (`mca_…`). On the agent machine, install the plugin and enter that key as `mc_api_key` and `build-box` as `agent_name`.
 
-The default scopes (`viewer`, `agent:self`) are read-only and not enough to register, send heartbeats or poll the queue; those need `operator`. An agent-scoped key without `admin` may only poll its own queue and connect as its own agent.
+**Alternative: enroll on the agent machine.** Install the plugin, then run the same script without `--print`. It saves URL, agent key and agent name with `claude plugin configure mission-control@mission-control --values-stdin`. The admin key is typed on that machine, so use this only where that is acceptable.
+
+Options: `--key-name` (label, default the hostname), `--expires-days` (default 90), `--existing` (issue another key for an agent that already exists; refused by default so you do not take over another machine's agent by accident). To revoke a key, send `DELETE /api/agents/<agent-id>/keys` with body `{"key_id": <id>}` and the admin key; the script prints the key id when it issues one.
+
+What an `operator` agent key can do in Mission Control v2.3.0:
+
+- It cannot use admin endpoints (users, keys, backups, settings).
+- Queue polling and heartbeats are restricted to its own agent.
+- It is otherwise a workspace-wide operator: it can update any task, and `POST /api/connect` does not check the agent name, so it can register or connect as any agent name. Treat it as a credential for the whole workspace, not for one agent.
+
+The default key scopes (`viewer`, `agent:self`) resolve to the read-only viewer role, which cannot connect, heartbeat or poll the queue.
 
 ## Compatibility
 
-The MCP server is vendored unchanged from Mission Control **v2.3.0** (commit `a61ebbfb5a5bf28a8d6345c4d07134a6c3beac52`). Tools that call endpoints missing from older Mission Control versions return an HTTP error; newer versions may expose tools this copy lacks.
+The MCP server is vendored from Mission Control **v2.3.0** (commit `a61ebbfb5a5bf28a8d6345c4d07134a6c3beac52`) with one patch, marked in `loadConfig`: when `MC_URL` is set (always, under this plugin) it ignores `~/.mission-control/profiles/default.json`. Upstream falls back to a session cookie saved there by `mc-cli login`, and Mission Control checks that cookie before the API key, so the agent would act as the logged-in user and send the cookie to whatever URL is configured. Tools that call endpoints missing from older Mission Control versions return an HTTP error; newer versions may expose tools this copy lacks.
 
 To update the vendored files to another tag:
 
@@ -67,7 +75,7 @@ for f in mc-mcp-server.cjs mc-base-url.cjs; do
 done
 ```
 
-Then update the tag and commit above, bump `version` in `plugins/mission-control/.claude-plugin/plugin.json`, and run `claude plugin validate .`.
+Then re-apply the `loadConfig` patch, update the tag and commit above, bump `version` in `plugins/mission-control/.claude-plugin/plugin.json`, and run `claude plugin validate .`.
 
 ## Layout
 
@@ -76,10 +84,11 @@ Then update the tag and commit above, bump `version` in `plugins/mission-control
 plugins/mission-control/
   .claude-plugin/plugin.json             manifest and user configuration
   .mcp.json                              MCP server definition
-  scripts/                               vendored upstream MCP server (MIT)
+  scripts/                               vendored upstream MCP server (MIT), mc-enroll.cjs
   skills/mission-control/SKILL.md        agent workflow skill
+test/                                    node --test test/
 ```
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The files in `plugins/mission-control/scripts/` are © Builderz Labs under the MIT license in [`scripts/LICENSE.mission-control`](plugins/mission-control/scripts/LICENSE.mission-control).
+MIT, see [LICENSE](LICENSE). `mc-mcp-server.cjs` and `mc-base-url.cjs` in `plugins/mission-control/scripts/` are © Builderz Labs under the MIT license in [`scripts/LICENSE.mission-control`](plugins/mission-control/scripts/LICENSE.mission-control).

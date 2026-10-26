@@ -25,7 +25,9 @@ function loadConfig() {
   // Try profile first, then env vars
   const profilePath = path.join(os.homedir(), '.mission-control', 'profiles', 'default.json');
   let profile = {};
-  try {
+  // mission-control-claude-plugin patch: with MC_URL set, ignore the CLI profile so a saved
+  // session cookie can't override the configured API key or leak to another host
+  if (!process.env.MC_URL) try {
     profile = JSON.parse(fs.readFileSync(profilePath, 'utf8'));
   } catch { /* no profile */ }
 

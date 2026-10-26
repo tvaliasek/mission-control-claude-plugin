@@ -17,12 +17,12 @@ This instance's agent name is `${user_config.agent_name}`.
 
 ## Work a task
 
-1. `mc_poll_task_queue` with `agent: "${user_config.agent_name}"`. The response either continues your current `in_progress` task, assigns a new one, or reports that none is available.
-2. `mc_get_task` for the full description, then `mc_update_task` with `status: "in_progress"`.
+1. `mc_poll_task_queue` with `agent: "${user_config.agent_name}"`. Polling claims the task: it is assigned to you and set to `in_progress`. The response's `reason` is `continue_current`, `assigned`, `at_capacity` (finish your current task first) or `no_tasks_available`.
+2. `mc_get_task` for the full description.
 3. Report progress and results with `mc_add_comment` on the task.
-4. Finish with `mc_update_task`: `review` when the work is ready for a human, `blocked` or `failed` with a comment that says why. Moving a task to `done` may require a quality-review approval in Mission Control, so do not retry if it is refused.
+4. Finish with `mc_update_task`: `review` when the work is ready for a human, `awaiting_owner` when you need input from the task owner, `failed` with a comment that says why. Moving a task to `done` requires a quality-review approval in Mission Control and is refused otherwise; do not retry.
 
-Task statuses: `inbox`, `assigned`, `in_progress`, `review`, `done`, `failed`, `blocked`, `cancelled`.
+Task statuses: `backlog`, `inbox`, `assigned`, `awaiting_owner`, `in_progress`, `review`, `quality_review`, `done`, `failed`.
 
 ## Report runs (optional)
 

@@ -27,8 +27,8 @@
     "agent_name": {
       "type": "string",
       "title": "Agent name",
-      "description": "Name this Claude Code instance uses when registering with Mission Control",
-      "default": "claude-code"
+      "description": "Unique name this Claude Code instance uses in Mission Control, e.g. build-box. Machines sharing a name share one agent and queue",
+      "required": true
     }
   }
 }
