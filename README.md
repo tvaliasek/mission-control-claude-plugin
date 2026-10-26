@@ -1,18 +1,18 @@
-# Mission Control plugin for Claude Code
+# Mission Control plugin for Claude Code and GitHub Copilot CLI
 
-A Claude Code plugin marketplace with one plugin, `mission-control`, that connects Claude Code to a self-hosted [Mission Control](https://github.com/builderz-labs/mission-control) instance.
+A plugin marketplace with one plugin, `mission-control`, that connects Claude Code or GitHub Copilot CLI to a self-hosted [Mission Control](https://github.com/builderz-labs/mission-control) instance.
 
 The plugin provides:
 
-- **MCP server** `mission-control`: the upstream `scripts/mc-mcp-server.cjs` (49 `mc_*` tools for agents, tasks, comments, runs, sessions, costs, skills and the knowledge base), started with your URL and API key.
+- **MCP server** `mission-control`: the upstream `scripts/mc-mcp-server.cjs` (49 `mc_*` tools for agents, tasks, comments, runs, sessions, costs, skills and the knowledge base), started through a small launcher (`scripts/mc-mcp-launch.cjs`) with your URL and API key.
 - **Skill** `mission-control:mission-control`: the connect → poll queue → work → report workflow, so the agent uses the tools in the right order.
 
 Not an official Builderz Labs project.
 
 ## Requirements
 
-- Claude Code with plugin support
-- Node.js 18 or later on the machine running Claude Code (the MCP server uses built-in `fetch`; no npm dependencies)
+- Claude Code with plugin support, or GitHub Copilot CLI (tested with 1.0.103)
+- Node.js 18 or later on that machine (the MCP server uses built-in `fetch`; no npm dependencies)
 - A Mission Control instance reachable over HTTP(S) from that machine, and an API key for it
 
 ## Install
@@ -36,6 +36,25 @@ To change them later, run `/plugin configure mission-control@mission-control` in
 
 Check the connection by asking Claude to "connect to Mission Control", or run `/mcp` and confirm `mission-control` is connected.
 
+## Install in GitHub Copilot CLI
+
+```bash
+copilot plugin marketplace add tvaliasek/mission-control-claude-plugin
+copilot plugin install mission-control@mission-control
+```
+
+Copilot CLI has no plugin configuration dialog: plugins cannot ask for values there, and its secret placeholders are only available to servers installed from its MCP registry ([github/copilot-cli#4042](https://github.com/github/copilot-cli/issues/4042)). The plugin therefore reads its settings from your environment when Copilot starts:
+
+```bash
+export MC_URL=https://mc.example.com
+export MC_API_KEY=mca_...          # an agent-scoped key, see below
+export MC_AGENT_NAME=build-box
+```
+
+The key is then in your shell environment rather than an OS keychain. Keep it out of shared dotfiles and prefer an agent-scoped key. Without `MC_URL` and `MC_API_KEY`, the `mission-control` MCP server does not start; `copilot mcp list` and `/mcp` show its status.
+
+How it works: `.mcp.json` passes both the Claude Code values (`${user_config.*}`) and the environment fallbacks (`${MC_URL:-}`, `${MC_API_KEY:-}`) to `scripts/mc-mcp-launch.cjs`. Copilot leaves `${user_config.*}` unexpanded, so the launcher uses the fallbacks, then starts the vendored server.
+
 ## Choosing an API key
 
 The server's global `API_KEY` authenticates as **admin**: an agent holding it can manage users, backups and every other agent. Give each machine an agent-scoped key instead. `scripts/mc-enroll.cjs` (Node 18+, no dependencies) uses the admin key once to register the agent and issue it a key with the `operator` scope; the admin key is read from `MC_ADMIN_API_KEY` or a hidden prompt and never stored.
@@ -47,9 +66,9 @@ curl -fsSLO https://raw.githubusercontent.com/tvaliasek/mission-control-claude-p
 node mc-enroll.cjs --url https://mc.example.com --agent build-box --print
 ```
 
-Download from a release tag, not `main`, and read the script before giving it your admin key. It prints only the agent key (`mca_…`). On the agent machine, install the plugin and enter that key as `mc_api_key` and `build-box` as `agent_name`.
+Download from a release tag, not `main`, and read the script before giving it your admin key. It prints only the agent key (`mca_…`). On the agent machine, install the plugin and enter that key as `mc_api_key` and `build-box` as `agent_name` (Copilot CLI: export it as `MC_API_KEY` and `MC_AGENT_NAME=build-box`).
 
-**Alternative: enroll on the agent machine.** Install the plugin, then run the same script without `--print`. It saves URL, agent key and agent name with `claude plugin configure mission-control@mission-control --values-stdin`. The admin key is typed on that machine, so use this only where that is acceptable. If `claude` cannot be started (for example the npm `claude.cmd` shim on Windows), the script prints the key instead and exits 1; enter it with `/plugin configure`.
+**Alternative: enroll on the agent machine** (Claude Code only). Install the plugin, then run the same script without `--print`. It saves URL, agent key and agent name with `claude plugin configure mission-control@mission-control --values-stdin`. The admin key is typed on that machine, so use this only where that is acceptable. If `claude` cannot be started (for example the npm `claude.cmd` shim on Windows), the script prints the key instead and exits 1; enter it with `/plugin configure`.
 
 Options: `--key-name` (label, default the hostname), `--expires-days` (default 90), `--existing` (issue another key for an agent that already exists; refused by default so you do not take over another machine's agent by accident). The script never follows HTTP redirects, so the admin key goes only to the URL you gave. To revoke a key, send `DELETE /api/agents/<agent-id>/keys` with body `{"key_id": <id>}` and the admin key; the script prints the key id when it issues one.
 

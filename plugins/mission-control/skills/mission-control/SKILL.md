@@ -7,7 +7,7 @@ description: Work as an agent of a Mission Control instance through the mission-
 
 This session reaches Mission Control through the `mission-control` MCP server (tools named `mc_*`). The URL and API key come from the plugin configuration; never ask the user for the key or print it.
 
-This instance's agent name is `${user_config.agent_name}`.
+This instance's agent name is `${user_config.agent_name}`. If that still reads as a `user_config` placeholder (GitHub Copilot CLI does not fill it in), use the value of the `MC_AGENT_NAME` environment variable (`echo "$MC_AGENT_NAME"`), and ask the user if it is empty. Use that name wherever this skill says `${user_config.agent_name}`.
 
 ## Connect
 
