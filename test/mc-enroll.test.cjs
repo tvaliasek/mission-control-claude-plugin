@@ -2,15 +2,17 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const http = require('node:http');
+const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
 const SCRIPT = path.join(__dirname, '..', 'plugins', 'mission-control', 'scripts', 'mc-enroll.cjs');
 const ADMIN_KEY = 'admin-test-key';
 
-// Mock of the two Mission Control v2.3.0 endpoints the script calls.
-function startServer(existingAgents = []) {
+// Mock of the Mission Control v2.3.0 endpoints the script calls.
+function startServer({ existingAgents = [], handler } = {}) {
   const requests = [];
   const server = http.createServer((req, res) => {
     let raw = '';
@@ -19,9 +21,16 @@ function startServer(existingAgents = []) {
       const body = raw ? JSON.parse(raw) : {};
       requests.push({ method: req.method, url: req.url, key: req.headers['x-api-key'], body });
       res.setHeader('Content-Type', 'application/json');
+      if (handler && handler(req, res)) return;
       if (req.headers['x-api-key'] !== ADMIN_KEY) {
         res.statusCode = 401;
         return res.end(JSON.stringify({ error: 'Authentication required' }));
+      }
+      const getMatch = req.method === 'GET' && req.url.match(/^\/api\/agents\/([^/]+)$/);
+      if (getMatch) {
+        const name = decodeURIComponent(getMatch[1]);
+        res.statusCode = existingAgents.includes(name) ? 200 : 404;
+        return res.end(JSON.stringify(existingAgents.includes(name) ? { agent: { id: 7, name } } : { error: 'Agent not found' }));
       }
       if (req.method === 'POST' && req.url === '/api/agents/register') {
         const exists = existingAgents.includes(body.name);
@@ -55,6 +64,27 @@ function run(args, env = {}) {
   });
 }
 
+// A fake `claude` on PATH that records its stdin, argv and whether it saw the admin key.
+const tempDirs = [];
+test.after(() => tempDirs.forEach((dir) => fs.rmSync(dir, { recursive: true, force: true })));
+
+function fakeClaude(exitCode) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-enroll-claude-'));
+  tempDirs.push(dir);
+  const out = path.join(dir, 'out.json');
+  const bin = path.join(dir, 'claude');
+  fs.writeFileSync(bin, `#!${process.execPath}
+let input = '';
+process.stdin.on('data', (d) => { input += d; }).on('end', () => {
+  require('fs').writeFileSync(${JSON.stringify(out)}, JSON.stringify({
+    argv: process.argv.slice(2), input, sawAdminKey: 'MC_ADMIN_API_KEY' in process.env,
+  }));
+  process.exit(${exitCode});
+});
+`, { mode: 0o755 });
+  return { PATH: `${dir}${path.delimiter}${process.env.PATH}`, read: () => JSON.parse(fs.readFileSync(out, 'utf8')) };
+}
+
 test('--print registers the agent and prints only the agent key', async () => {
   const srv = await startServer();
   try {
@@ -62,20 +92,22 @@ test('--print registers the agent and prints only the agent key', async () => {
     assert.equal(r.code, 0, r.stderr);
     assert.equal(r.stdout, 'mca_agentkey\n');
     assert.ok(!r.stderr.includes(ADMIN_KEY));
-    assert.deepEqual(srv.requests.map((q) => q.url), ['/api/agents/register', '/api/agents/7/keys']);
-    assert.deepEqual(srv.requests[1].body, { name: 'ci', scopes: ['operator'], expires_in_days: 90 });
+    assert.deepEqual(srv.requests.map((q) => `${q.method} ${q.url}`), [
+      'GET /api/agents/build-box', 'POST /api/agents/register', 'POST /api/agents/7/keys',
+    ]);
+    assert.deepEqual(srv.requests[2].body, { name: 'ci', scopes: ['operator'], expires_in_days: 90 });
   } finally {
     srv.close();
   }
 });
 
-test('refuses an existing agent unless --existing is given', async () => {
-  const srv = await startServer(['build-box']);
+test('refuses an existing agent without touching it unless --existing is given', async () => {
+  const srv = await startServer({ existingAgents: ['build-box'] });
   try {
     const refused = await run(['--url', srv.url, '--agent', 'build-box', '--print']);
     assert.equal(refused.code, 1);
     assert.match(refused.stderr, /already exists/);
-    assert.equal(srv.requests.length, 1, 'no key may be issued');
+    assert.deepEqual(srv.requests.map((q) => q.method), ['GET'], 'only the read-only lookup may run');
 
     const allowed = await run(['--url', srv.url, '--agent', 'build-box', '--existing', '--print']);
     assert.equal(allowed.code, 0, allowed.stderr);
@@ -97,15 +129,80 @@ test('reports an HTTP error without issuing a key', async () => {
   }
 });
 
+test('does not follow redirects with the admin key', async () => {
+  const other = await startServer();
+  const srv = await startServer({
+    handler: (req, res) => {
+      res.statusCode = 307;
+      res.setHeader('Location', `${other.url}${req.url}`);
+      res.end();
+      return true;
+    },
+  });
+  try {
+    const r = await run(['--url', srv.url, '--agent', 'build-box', '--print']);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /redirects are not followed/);
+    assert.equal(other.requests.length, 0);
+  } finally {
+    srv.close();
+    other.close();
+  }
+});
+
+test('rejects a key with control characters without echoing it', async () => {
+  const srv = await startServer();
+  try {
+    const r = await run(['--url', srv.url, '--agent', 'build-box', '--print'], { MC_ADMIN_API_KEY: 'ab\u0004secret' });
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /invalid characters/);
+    assert.ok(!r.stderr.includes('secret'));
+    assert.equal(srv.requests.length, 0);
+  } finally {
+    srv.close();
+  }
+});
+
+test('configures the plugin through claude without passing on the admin key', async () => {
+  const srv = await startServer();
+  const claude = fakeClaude(0);
+  try {
+    const r = await run(['--url', srv.url, '--agent', 'build-box'], { PATH: claude.PATH });
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.stdout, '');
+    const seen = claude.read();
+    assert.deepEqual(seen.argv, ['plugin', 'configure', 'mission-control@mission-control', '--values-stdin']);
+    assert.deepEqual(JSON.parse(seen.input), { mc_url: srv.url, mc_api_key: 'mca_agentkey', agent_name: 'build-box' });
+    assert.equal(seen.sawAdminKey, false);
+  } finally {
+    srv.close();
+  }
+});
+
+test('prints the issued key when configuring the plugin fails', async () => {
+  const srv = await startServer();
+  const claude = fakeClaude(3);
+  try {
+    const r = await run(['--url', srv.url, '--agent', 'build-box'], { PATH: claude.PATH });
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /exited with 3/);
+    assert.equal(r.stdout, 'mca_agentkey\n');
+  } finally {
+    srv.close();
+  }
+});
+
 test('rejects invalid arguments before any request', async () => {
-  for (const args of [
-    ['--agent', 'x'],
-    ['--url', 'ftp://mc.example.com', '--agent', 'x'],
-    ['--url', 'https://u:p@mc.example.com', '--agent', 'x'],
-    ['--url', 'https://mc.example.com', '--agent', '-bad'],
-    ['--url', 'https://mc.example.com', '--agent', 'x', '--expires-days', '0'],
+  for (const [args, message] of [
+    [['--agent', 'x'], /--url is required/],
+    [['--url', 'ftp://mc.example.com', '--agent', 'x'], /HTTP or HTTPS/],
+    [['--url', 'https://u:p@mc.example.com', '--agent', 'x'], /credentials/],
+    [['--url', 'https://mc.example.com', '--agent', '-bad'], /--agent is required/],
+    [['--url', 'https://mc.example.com', '--agent', '123'], /--agent is required/],
+    [['--url', 'https://mc.example.com', '--agent', 'x', '--expires-days', '0'], /--expires-days/],
   ]) {
     const r = await run(args);
     assert.equal(r.code, 1, `expected failure for ${args.join(' ')}`);
+    assert.match(r.stderr, message);
   }
 });

@@ -43,21 +43,21 @@ The server's global `API_KEY` authenticates as **admin**: an agent holding it ca
 **Recommended: enroll from a trusted workstation**, so the admin key never touches the agent machine:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/tvaliasek/mission-control-claude-plugin/main/plugins/mission-control/scripts/mc-enroll.cjs
+curl -fsSLO https://raw.githubusercontent.com/tvaliasek/mission-control-claude-plugin/v0.1.0/plugins/mission-control/scripts/mc-enroll.cjs
 node mc-enroll.cjs --url https://mc.example.com --agent build-box --print
 ```
 
-It prints only the agent key (`mca_…`). On the agent machine, install the plugin and enter that key as `mc_api_key` and `build-box` as `agent_name`.
+Download from a release tag, not `main`, and read the script before giving it your admin key. It prints only the agent key (`mca_…`). On the agent machine, install the plugin and enter that key as `mc_api_key` and `build-box` as `agent_name`.
 
-**Alternative: enroll on the agent machine.** Install the plugin, then run the same script without `--print`. It saves URL, agent key and agent name with `claude plugin configure mission-control@mission-control --values-stdin`. The admin key is typed on that machine, so use this only where that is acceptable.
+**Alternative: enroll on the agent machine.** Install the plugin, then run the same script without `--print`. It saves URL, agent key and agent name with `claude plugin configure mission-control@mission-control --values-stdin`. The admin key is typed on that machine, so use this only where that is acceptable. If `claude` cannot be started (for example the npm `claude.cmd` shim on Windows), the script prints the key instead and exits 1; enter it with `/plugin configure`.
 
-Options: `--key-name` (label, default the hostname), `--expires-days` (default 90), `--existing` (issue another key for an agent that already exists; refused by default so you do not take over another machine's agent by accident). To revoke a key, send `DELETE /api/agents/<agent-id>/keys` with body `{"key_id": <id>}` and the admin key; the script prints the key id when it issues one.
+Options: `--key-name` (label, default the hostname), `--expires-days` (default 90), `--existing` (issue another key for an agent that already exists; refused by default so you do not take over another machine's agent by accident). The script never follows HTTP redirects, so the admin key goes only to the URL you gave. To revoke a key, send `DELETE /api/agents/<agent-id>/keys` with body `{"key_id": <id>}` and the admin key; the script prints the key id when it issues one.
 
 What an `operator` agent key can do in Mission Control v2.3.0:
 
 - It cannot use admin endpoints (users, keys, backups, settings).
-- Queue polling and heartbeats are restricted to its own agent.
-- It is otherwise a workspace-wide operator: it can update any task, and `POST /api/connect` does not check the agent name, so it can register or connect as any agent name. Treat it as a credential for the whole workspace, not for one agent.
+- Queue polling, heartbeats, single-task updates and task comments are restricted to its own agent and the tasks assigned to it.
+- Some operator endpoints do not check the agent: the queue can claim unassigned tasks, the bulk `PUT /api/tasks` can change the status of any task, and `POST /api/connect` and `/api/agents/register` accept any agent name. Treat the key as a credential for the whole workspace, not for one agent.
 
 The default key scopes (`viewer`, `agent:self`) resolve to the read-only viewer role, which cannot connect, heartbeat or poll the queue.
 

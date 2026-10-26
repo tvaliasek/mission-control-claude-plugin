@@ -26,6 +26,8 @@ const { spawnSync } = require('node:child_process');
 
 const PLUGIN_ID = 'mission-control@mission-control';
 const NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$/;
+// Printable ASCII only: anything else is rejected by fetch with an error that echoes the value
+const KEY_RE = /^[\x21-\x7e]+$/;
 
 function fail(message) {
   process.stderr.write(`mc-enroll: ${message}\n`);
@@ -52,8 +54,9 @@ function parseArgs(argv) {
     } else fail(`unknown argument: ${arg}`);
   }
   if (!opts.url) fail('--url is required');
-  if (!opts.agent || !NAME_RE.test(opts.agent)) {
-    fail('--agent is required: 1-63 letters, digits, dots, hyphens or underscores, starting with a letter or digit');
+  // all-digit names are rejected because Mission Control resolves them as agent ids
+  if (!opts.agent || !NAME_RE.test(opts.agent) || /^\d+$/.test(opts.agent)) {
+    fail('--agent is required: 1-63 letters, digits, dots, hyphens or underscores, starting with a letter or digit, not only digits');
   }
   if (!Number.isInteger(opts.expiresDays) || opts.expiresDays < 1 || opts.expiresDays > 3650) {
     fail('--expires-days must be an integer between 1 and 3650');
@@ -88,16 +91,18 @@ function promptHidden(question) {
     stdin.resume();
     stdin.setEncoding('utf8');
     let input = '';
-    const onData = (chunk) => {
+    const finish = () => {
+      stdin.setRawMode(false);
+      stdin.pause();
+      stdin.removeAllListeners('data');
+      stdin.removeAllListeners('end');
+      process.stderr.write('\n');
+      resolve(input);
+    };
+    stdin.on('end', finish);
+    stdin.on('data', (chunk) => {
       for (const ch of chunk) {
-        if (ch === '\r' || ch === '\n') {
-          stdin.setRawMode(false);
-          stdin.pause();
-          stdin.removeListener('data', onData);
-          process.stderr.write('\n');
-          resolve(input);
-          return;
-        }
+        if (ch === '\r' || ch === '\n' || ch === '\u0004') return finish();
         if (ch === '\u0003') {
           stdin.setRawMode(false);
           process.stderr.write('\n');
@@ -106,33 +111,45 @@ function promptHidden(question) {
         if (ch === '\u007f' || ch === '\b') input = input.slice(0, -1);
         else input += ch;
       }
-    };
-    stdin.on('data', onData);
+    });
   });
 }
 
 async function api(baseUrl, adminKey, method, route, body) {
-  const res = await fetch(`${baseUrl}${route}`, {
-    method,
-    headers: { 'x-api-key': adminKey, 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(30000),
-  });
+  let res;
+  try {
+    res = await fetch(`${baseUrl}${route}`, {
+      method,
+      headers: { 'x-api-key': adminKey, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      // following a redirect would send the admin key to the redirect target
+      redirect: 'error',
+      signal: AbortSignal.timeout(30000),
+    });
+  } catch (err) {
+    // fetch error messages can contain header values, so report only the cause code
+    fail(`${method} ${route} failed: ${err?.cause?.code || err?.name || 'network error'} (redirects are not followed)`);
+  }
   const text = await res.text();
   let data;
   try { data = JSON.parse(text); } catch { data = {}; }
-  if (!res.ok) {
-    fail(`${method} ${route} failed: HTTP ${res.status}${data.error ? ` ${data.error}` : ''}`);
-  }
-  return data;
+  return { status: res.status, ok: res.ok, data };
+}
+
+function checked(method, route, result) {
+  if (!result.ok) fail(`${method} ${route} failed: HTTP ${result.status}${result.data.error ? ` ${result.data.error}` : ''}`);
+  return result.data;
 }
 
 function configurePlugin(values) {
+  const env = { ...process.env };
+  delete env.MC_ADMIN_API_KEY;
   const result = spawnSync('claude', ['plugin', 'configure', PLUGIN_ID, '--values-stdin'], {
     input: JSON.stringify(values),
     stdio: ['pipe', 'inherit', 'inherit'],
+    env,
   });
-  if (result.error) return `could not run claude: ${result.error.message}`;
+  if (result.error) return `could not run claude: ${result.error.code || result.error.message}`;
   if (result.status !== 0) return `claude plugin configure exited with ${result.status}`;
   return null;
 }
@@ -141,22 +158,32 @@ async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const adminKey = (process.env.MC_ADMIN_API_KEY || '').trim() || (await promptHidden('Mission Control admin API key: ')).trim();
   if (!adminKey) fail('admin API key is empty');
+  if (!KEY_RE.test(adminKey)) fail('admin API key contains invalid characters');
 
-  const reg = await api(opts.url, adminKey, 'POST', '/api/agents/register', { name: opts.agent, framework: 'claude-code' });
-  if (!reg.agent || reg.agent.id == null) fail('unexpected response from /api/agents/register');
-  if (reg.registered === false && !opts.existing) {
-    fail(`agent "${opts.agent}" already exists; pass --existing to issue it another key`);
+  // look up first: registering an existing agent would reset its status to idle
+  const agentRoute = `/api/agents/${encodeURIComponent(opts.agent)}`;
+  const lookup = await api(opts.url, adminKey, 'GET', agentRoute);
+  if (lookup.status !== 404) {
+    checked('GET', agentRoute, lookup);
+    if (!opts.existing) fail(`agent "${opts.agent}" already exists; pass --existing to issue it another key`);
   }
+
+  const reg = checked('POST', '/api/agents/register', await api(opts.url, adminKey, 'POST', '/api/agents/register', {
+    name: opts.agent,
+    framework: 'claude-code',
+  }));
+  if (!reg.agent || reg.agent.id == null) fail('unexpected response from /api/agents/register');
   process.stderr.write(`mc-enroll: agent "${reg.agent.name}" ${reg.registered ? 'registered' : 'exists'} (id ${reg.agent.id})\n`);
 
   // operator is the lowest role that can connect, heartbeat, poll the queue and update tasks
-  const issued = await api(opts.url, adminKey, 'POST', `/api/agents/${reg.agent.id}/keys`, {
+  const keysRoute = `/api/agents/${reg.agent.id}/keys`;
+  const issued = checked('POST', keysRoute, await api(opts.url, adminKey, 'POST', keysRoute, {
     name: opts.keyName,
     scopes: ['operator'],
     expires_in_days: opts.expiresDays,
-  });
+  }));
   if (!issued.api_key) fail('unexpected response from the key endpoint');
-  process.stderr.write(`mc-enroll: issued key ${issued.key.key_prefix}… (id ${issued.key.id}), expires in ${opts.expiresDays} days\n`);
+  process.stderr.write(`mc-enroll: issued key ${issued.key?.key_prefix ?? ''}… (id ${issued.key?.id ?? '?'}), expires in ${opts.expiresDays} days\n`);
 
   if (opts.print) {
     process.stdout.write(`${issued.api_key}\n`);
@@ -168,9 +195,10 @@ async function main() {
     // The key exists server-side now; print it so it is not lost.
     process.stderr.write(`mc-enroll: ${error}\nmc-enroll: configure the plugin manually with this key:\n`);
     process.stdout.write(`${issued.api_key}\n`);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
   process.stderr.write(`mc-enroll: configured ${PLUGIN_ID}; start a new Claude Code session to use it\n`);
 }
 
-main().catch((err) => fail(err?.message || String(err)));
+main().catch(() => fail('unexpected error'));
