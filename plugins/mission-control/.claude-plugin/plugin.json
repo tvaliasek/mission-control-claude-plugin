@@ -2,7 +2,7 @@
   "name": "mission-control",
   "displayName": "Mission Control",
   "version": "0.1.0",
-  "description": "Connects Claude Code to a self-hosted Mission Control instance (builderz-labs/mission-control) through its MCP server",
+  "description": "Connects Claude Code or GitHub Copilot CLI to a self-hosted Mission Control instance (builderz-labs/mission-control) through its MCP server",
   "author": {
     "name": "Tomáš Valiašek",
     "url": "https://github.com/tvaliasek"

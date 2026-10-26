@@ -9,7 +9,7 @@
     {
       "name": "mission-control",
       "source": "./plugins/mission-control",
-      "description": "Connects Claude Code to Mission Control: MCP tools for agents, tasks, runs, costs and knowledge, plus a skill for the agent workflow"
+      "description": "Connects Claude Code or GitHub Copilot CLI to Mission Control: MCP tools for agents, tasks, runs, costs and knowledge, plus a skill for the agent workflow"
     }
   ]
 }

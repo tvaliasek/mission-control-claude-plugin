@@ -97,7 +97,7 @@ npm run fix            # apply lint and format fixes
 npm run vendor         # re-vendor the upstream tag in upstream.json; `-- v2.4.0` or `-- --latest` to change it
 ```
 
-The tests run against the built `mc-enroll.cjs`, the file users download, so `npm test` needs a prior `npm run build`.
+The tests run against the built files in `plugins/mission-control/scripts/`, the files users get, so `npm test` needs a prior `npm run build`.
 
 ## Layout
 
@@ -106,9 +106,9 @@ The tests run against the built `mc-enroll.cjs`, the file users download, so `np
 plugins/mission-control/                 the plugin as installed
   .claude-plugin/plugin.json             manifest and user configuration
   .mcp.json                              MCP server definition
-  scripts/                               build output (mc-enroll.cjs) and vendored upstream files
+  scripts/                               build output (mc-enroll.cjs, mc-mcp-launch.cjs) and vendored upstream files
   skills/mission-control/SKILL.md        agent workflow skill
-src/mc-enroll.ts                         source of scripts/mc-enroll.cjs
+src/                                     sources of the built scripts
 scripts/vendor-upstream.ts               vendors and patches the upstream MCP server
 test/                                    Rstest tests
 upstream.json                            vendored upstream tag and commit

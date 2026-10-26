@@ -94,6 +94,7 @@ describe("mc-mcp-launch", () => {
       const r = await callTool(
         {
           ...CLAUDE_CODE_ENV,
+          MC_API_KEY_FALLBACK: "mca_from_shell",
           MC_URL: mc.url,
           MC_URL_FALLBACK: "http://127.0.0.1:1",
         },
@@ -117,6 +118,30 @@ describe("mc-mcp-launch", () => {
       expect(mc.seen).toEqual([{ key: "mca_from_shell", url: "/api/agents" }]);
     } finally {
       mc.close();
+    }
+  });
+
+  test("never pairs a configured URL with a key from the shell", async () => {
+    const configured = await startMissionControl();
+    const shell = await startMissionControl();
+    try {
+      const r = await callTool(
+        {
+          ...COPILOT_ENV,
+          MC_API_KEY_FALLBACK: "mca_from_shell",
+          MC_URL: configured.url,
+          MC_URL_FALLBACK: shell.url,
+        },
+        "mc_list_agents"
+      );
+      expect(r.stdout, r.stderr).toContain('"id":2');
+      expect(configured.seen).toEqual([]);
+      expect(shell.seen).toEqual([
+        { key: "mca_from_shell", url: "/api/agents" },
+      ]);
+    } finally {
+      configured.close();
+      shell.close();
     }
   });
 
