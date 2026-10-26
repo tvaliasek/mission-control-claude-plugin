@@ -91,17 +91,13 @@ const applyPatch = (source: string): string => {
 };
 
 // Edits only the version string so the manifest keeps its formatting.
-const bumpPluginPatchVersion = () => {
-  const manifest = readFileSync(PLUGIN_JSON, "utf-8");
+const bumpPatchVersion = (manifest: string): string => {
   const groups = VERSION_FIELD_RE.exec(manifest)?.groups;
   if (!groups) {
     throw new Error(`no MAJOR.MINOR.PATCH "version" in ${PLUGIN_JSON}`);
   }
   const next = `${groups.major}.${groups.minor}.${Number(groups.patch) + 1}`;
-  writeFileSync(
-    PLUGIN_JSON,
-    manifest.replace(VERSION_FIELD_RE, `"version": "${next}"`)
-  );
+  return manifest.replace(VERSION_FIELD_RE, `"version": "${next}"`);
 };
 
 const resolveTag = async (arg: string | undefined, current: Upstream) => {
@@ -127,25 +123,31 @@ const main = async () => {
     throw new Error(`unexpected commit SHA for ${tag}`);
   }
 
-  // download everything before writing, so a failed fetch leaves no mixed versions
+  // compute every output before writing any, so a failure leaves no mixed state
   const contents = await Promise.all(
     Object.keys(FILES).map((from) => download(current.repo, sha, from))
   );
-  const patched = Object.entries(FILES).map(([from, to], i) => {
-    const content = contents[i] ?? "";
-    return [to, from === PATCH.file ? applyPatch(content) : content] as const;
-  });
-  for (const [to, content] of patched) {
-    writeFileSync(path.join(SCRIPTS_DIR, to), content);
-  }
-
+  const outputs: [string, string][] = Object.entries(FILES).map(
+    ([from, to], i) => {
+      const content = contents[i] ?? "";
+      return [
+        path.join(SCRIPTS_DIR, to),
+        from === PATCH.file ? applyPatch(content) : content,
+      ];
+    }
+  );
   const changed = tag !== current.tag || sha !== current.commit;
   if (changed) {
-    writeFileSync(
-      UPSTREAM_JSON,
-      `${JSON.stringify({ ...current, commit: sha, tag }, null, 2)}\n`
+    outputs.push(
+      [
+        UPSTREAM_JSON,
+        `${JSON.stringify({ ...current, commit: sha, tag }, null, 2)}\n`,
+      ],
+      [PLUGIN_JSON, bumpPatchVersion(readFileSync(PLUGIN_JSON, "utf-8"))]
     );
-    bumpPluginPatchVersion();
+  }
+  for (const [file, content] of outputs) {
+    writeFileSync(file, content);
   }
   process.stdout.write(
     `${changed ? "updated to" : "unchanged at"} ${current.repo}@${tag} (${sha})\n`

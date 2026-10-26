@@ -22,14 +22,11 @@ concurrency:
 jobs:
   vendor:
     runs-on: ubuntu-latest
-    env:
-      # PRs opened with the default token do not trigger CI; set UPSTREAM_PR_TOKEN
-      # (fine-grained PAT: contents + pull requests) to have CI run on them.
-      GH_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN || github.token }}
     steps:
+      # no stored credentials while dependency code runs; only the last step gets a write token
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          token: ${{ secrets.UPSTREAM_PR_TOKEN || github.token }}
+          persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
@@ -42,21 +39,27 @@ jobs:
         run: node scripts/vendor-upstream.ts "${TAG:---latest}"
       - if: steps.vendor.outputs.changed == 'true'
         run: npm run check
-      - if: steps.vendor.outputs.changed == 'true'
+      - name: Push branch and open pull request
+        if: steps.vendor.outputs.changed == 'true'
         env:
+          # PRs opened with the default token do not trigger CI; set UPSTREAM_PR_TOKEN
+          # (fine-grained PAT: contents + pull requests) to have CI run on them.
+          GH_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN || github.token }}
           TAG: ${{ steps.vendor.outputs.tag }}
         run: |
           branch="upstream/${TAG}"
-          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
-            echo "Branch $branch already exists; not opening another PR."
-            exit 0
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if ! git ls-remote --exit-code --heads "$remote" "$branch" >/dev/null; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git switch -c "$branch"
+            git add -A plugins/ upstream.json
+            git commit -m "Vendor Mission Control ${TAG} MCP server"
+            git push "$remote" "$branch"
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "$branch"
-          git add -A plugins/ upstream.json
-          git commit -m "Vendor Mission Control ${TAG} MCP server"
-          git push origin "$branch"
-          gh pr create --base main --head "$branch" \
-            --title "Vendor Mission Control ${TAG}" \
-            --body "Re-vendors scripts/mc-mcp-server.cjs and mc-base-url.cjs from builderz-labs/mission-control ${TAG}, re-applies the loadConfig patch and bumps the plugin version. Review the upstream diff for new tools or changed endpoints before merging."
+          # a rerun after a failed `gh pr create` finds the branch and still opens the PR
+          if [ "$(gh pr list --head "$branch" --state all --json number --jq length)" = "0" ]; then
+            gh pr create --base main --head "$branch" \
+              --title "Vendor Mission Control ${TAG}" \
+              --body "Re-vendors scripts/mc-mcp-server.cjs and mc-base-url.cjs from builderz-labs/mission-control ${TAG}, re-applies the loadConfig patch and bumps the plugin version. Review the upstream diff for new tools or changed endpoints before merging."
+          fi

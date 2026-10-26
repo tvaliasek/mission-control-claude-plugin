@@ -169,8 +169,9 @@ const parseArgs = (argv: string[]): Options => {
 
 const readHidden = async (stdin: NodeJS.ReadStream): Promise<string> => {
   let input = "";
-  // stdin ending (terminal closed) also ends the loop
-  for await (const chunk of stdin) {
+  // stdin ending (terminal closed) also ends the loop. Without destroyOnReturn: false,
+  // returning early destroys stdin and Node 18 then can't leave raw mode.
+  for await (const chunk of stdin.iterator({ destroyOnReturn: false })) {
     for (const ch of chunk as string) {
       if (ch === "\r" || ch === "\n" || ch === "\u0004") {
         return input;
@@ -227,7 +228,7 @@ const api = async (
     });
   } catch (error) {
     // fetch error messages can contain header values, so report only the cause code
-    const err = error as { name?: string; cause?: { code?: string } };
+    const err = (error ?? {}) as { name?: string; cause?: { code?: string } };
     return fail(
       `${method} ${route} failed: ${err.cause?.code ?? err.name ?? "network error"} (redirects are not followed)`
     );
