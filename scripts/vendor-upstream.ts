@@ -6,7 +6,8 @@
    node scripts/vendor-upstream.ts v2.4.0     vendor that tag
    node scripts/vendor-upstream.ts --latest   vendor the latest upstream release,
                                               unless it is older than the vendored one
-   ... --accept-moved                         take a vendored tag that upstream moved
+   node scripts/vendor-upstream.ts v2.3.0 --accept-moved
+                                              take a vendored tag that upstream moved
                                               to another commit (refused otherwise)
 
  Files are fetched at the tag's commit SHA. When the tag changes, upstream.json is
@@ -25,7 +26,8 @@ const PLUGIN_JSON = path.join(
 );
 const SCRIPTS_DIR = path.join(ROOT, "plugins/mission-control/scripts");
 const SHA_RE = /^[0-9a-f]{40}$/u;
-const TAG_RE = /^v\d+\.\d+\.\d+$/u;
+// no leading zeros: v02.3.0 must not pass as a release other than v2.3.0
+const TAG_RE = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const VERSION_FIELD_RE =
   /"version": "(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)"/u;
 
@@ -131,15 +133,66 @@ const resolveTag = async (arg: string | undefined, current: Upstream) => {
   return arg ?? current.tag;
 };
 
-const main = async () => {
-  const args = process.argv.slice(2);
-  const acceptMoved = args.includes("--accept-moved");
-  const arg = args.find((a) => a !== "--accept-moved");
+const commitOf = async (repo: string, tag: string): Promise<string> => {
+  const { sha } = (await github(
+    `/repos/${repo}/commits/${encodeURIComponent(tag)}`
+  )) as { sha: string };
+  if (!SHA_RE.test(sha)) {
+    throw new Error(`unexpected commit SHA for ${tag}`);
+  }
+  return sha;
+};
+
+// Only as "<tag> --accept-moved": the workflow passes one argument, so it can't accept
+// a moved tag; that is for a person who checked upstream.
+const parseArgs = (args: string[]) => {
+  const acceptMoved = args[1] === "--accept-moved";
+  const valid = acceptMoved
+    ? args.length === 2 && TAG_RE.test(args[0] ?? "")
+    : args.length <= 1;
+  if (!valid) {
+    throw new Error(
+      "usage: vendor-upstream.ts [<tag> [--accept-moved] | --latest]"
+    );
+  }
+  return { acceptMoved, arg: args[0] };
+};
+
+const readPinned = (): Upstream => {
   const current = JSON.parse(readFileSync(UPSTREAM_JSON, "utf-8")) as Upstream;
+  if (!(TAG_RE.test(current.tag) && SHA_RE.test(current.commit))) {
+    throw new Error(`unexpected tag or commit in ${UPSTREAM_JSON}`);
+  }
+  return current;
+};
+
+// A vendored tag that upstream moved to another commit is a possible upstream
+// compromise: refuse to go on until someone checks and takes it on purpose. Returns
+// the vendored tag's current commit.
+const checkVendoredTag = async (
+  current: Upstream,
+  acceptMoved: boolean
+): Promise<string> => {
+  const sha = await commitOf(current.repo, current.tag);
+  if (sha !== current.commit && !acceptMoved) {
+    throw new Error(
+      `upstream moved ${current.tag} from ${current.commit} to ${sha}. Check upstream before taking it: npm run vendor -- ${current.tag} --accept-moved`
+    );
+  }
+  return sha;
+};
+
+const main = async () => {
+  const { acceptMoved, arg } = parseArgs(process.argv.slice(2));
+  const current = readPinned();
   const tag = await resolveTag(arg, current);
   if (!TAG_RE.test(tag)) {
     throw new Error(`unexpected tag "${tag}"`);
   }
+  // a newer release replaces the vendored tag, so only then is the check skipped
+  const vendoredSha = isOlder(current.tag, tag)
+    ? undefined
+    : await checkVendoredTag(current, acceptMoved && tag === current.tag);
   // the latest release can go back (newest one deleted, an older one marked latest):
   // keep what is vendored instead of opening a downgrade
   if (arg === "--latest" && isOlder(tag, current.tag)) {
@@ -149,19 +202,10 @@ const main = async () => {
     writeOutputs(false, current.tag, current.commit);
     return;
   }
-  const { sha } = (await github(
-    `/repos/${current.repo}/commits/${encodeURIComponent(tag)}`
-  )) as { sha: string };
-  if (!SHA_RE.test(sha)) {
-    throw new Error(`unexpected commit SHA for ${tag}`);
-  }
-  // a released tag pointing at another commit than the one vendored is a possible
-  // upstream compromise: refuse it until someone checks and takes it on purpose
-  if (tag === current.tag && sha !== current.commit && !acceptMoved) {
-    throw new Error(
-      `upstream moved ${tag} from ${current.commit} to ${sha}. Check upstream before taking it: npm run vendor -- ${tag} --accept-moved`
-    );
-  }
+  const sha =
+    tag === current.tag && vendoredSha
+      ? vendoredSha
+      : await commitOf(current.repo, tag);
 
   // compute every output before writing any, so a failure leaves no mixed state
   const contents = await Promise.all(
