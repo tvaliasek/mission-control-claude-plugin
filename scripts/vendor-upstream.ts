@@ -186,7 +186,8 @@ const readPinned = (): Upstream => {
         map !== null &&
         !Array.isArray(map) &&
         Object.entries(map).every(
-          ([t, sha]) => TAG_RE.test(t) && SHA_RE.test(String(sha))
+          ([t, sha]) =>
+            TAG_RE.test(t) && typeof sha === "string" && SHA_RE.test(sha)
         ));
     if (!valid) {
       throw new Error(`unexpected "${field}" in ${UPSTREAM_JSON}`);
@@ -310,6 +311,10 @@ const main = async () => {
       ? vendoredSha
       : await commitOf(current.repo, tag);
   if (turnedDown(current, tag, sha, acceptMoved)) {
+    // nothing is vendored on this path, so the tag in use must still be intact
+    if (vendoredSha === undefined) {
+      await checkVendoredTag(current);
+    }
     process.stdout.write(
       `${tag} at ${sha} was rejected by a rollback; unchanged at ${current.tag}\n`
     );

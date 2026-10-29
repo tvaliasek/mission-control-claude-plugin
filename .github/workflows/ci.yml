@@ -72,16 +72,29 @@ jobs:
             const file = process.argv[1];
             if (!fs.existsSync(file)) process.exit(0);
             const base = JSON.parse(fs.readFileSync(file, "utf8"));
+            const fail = (message) => {
+              console.log(`::error::upstream.json ${message}`);
+              process.exit(1);
+            };
+            if (head.repo !== base.repo) fail(`changed repo from ${base.repo} to ${head.repo}`);
+            // only the tag this change vendors may get a new commit (--accept-moved), and
+            // only the tag it rolls back from may be newly turned down
             const history = (u) => ({ ...u.known, [u.tag]: u.commit });
             const [was, now] = [history(base), history(head)];
             for (const [tag, sha] of Object.entries(was)) {
-              if (!(tag in now)) {
-                console.log(`::error::upstream.json dropped the recorded ${tag}`);
-                process.exit(1);
-              }
-              if (now[tag] !== sha) {
-                console.log(`::warning::upstream.json records ${tag} at ${now[tag]}, was ${sha}: a moved tag was taken`);
-              }
+              if (!(tag in now)) fail(`dropped the recorded ${tag}`);
+              if (now[tag] === sha) continue;
+              if (tag !== head.tag) fail(`changed the recorded commit of ${tag}`);
+              console.log(`::warning::upstream.json takes ${tag} at ${now[tag]}, recorded at ${sha}: a moved tag was accepted`);
+            }
+            const v = (t) => t.slice(1).split(".").map(Number);
+            const [h, b] = [v(head.tag), v(base.tag)];
+            const k = h.findIndex((n, i) => n !== b[i]);
+            const rolledBackFrom = k !== -1 && h[k] < b[k] ? base.tag : undefined;
+            for (const [tag, sha] of Object.entries(head.rejected ?? {})) {
+              if (base.rejected?.[tag] === sha) continue;
+              if (tag !== rolledBackFrom) fail(`added or changed the rejected commit of ${tag}`);
+              console.log(`::warning::upstream.json rolls back from ${tag}, turning down its commit ${sha}`);
             }
           ' "$RUNNER_TEMP/base-upstream.json"
       - run: npm ci
