@@ -86,25 +86,31 @@ jobs:
         run: |
           branch="upstream/${TAG}"
           # this repository's PRs from that branch only (filtered by owner on the server,
-          # so fork PRs with the same branch name don't count): "<open> <closed unmerged> <merged>"
+          # so fork PRs with the same branch name don't count):
+          # "<all> <open> <closed unmerged> <merged>"; anything unexpected fails the step
           counts=$(gh api "repos/${GITHUB_REPOSITORY}/pulls?head=${GITHUB_REPOSITORY_OWNER}:${branch}&state=all" \
-            --jq '"\(map(select(.state == "open")) | length) \(map(select(.state == "closed" and .merged_at == null)) | length) \(map(select(.merged_at != null)) | length)"')
-          read -r open rejected merged <<<"$counts"
-          case "${open}:${rejected}:${merged}" in
+            --jq 'if type != "array" then error("not a list") else "\(length) \(map(select(.state == "open")) | length) \(map(select(.state == "closed" and .merged_at == null)) | length) \(map(select(.state == "closed" and .merged_at != null)) | length)" end')
+          read -r total open rejected merged <<<"$counts"
+          case "${total}:${open}:${rejected}:${merged}" in
             *[!0-9:]* | :* | *: | *::*) echo "::error::unexpected answer listing pull requests: ${counts}"; exit 1 ;;
           esac
+          if [ "$total" -ne $((open + rejected + merged)) ]; then
+            echo "::error::unexpected pull request states: ${counts}"
+            exit 1
+          fi
           if [ "$open" != "0" ]; then
             echo "::notice::a pull request from ${branch} is open"
             exit 0
           fi
+          if [ "$merged" != "0" ]; then
+            # merged, yet master doesn't hold this tag at this commit: upstream may have
+            # moved a released tag (a supply-chain signal), so fail and notify
+            echo "::error::a pull request from ${branch} was merged, but master does not hold ${TAG} at ${COMMIT}. Upstream may have moved the tag, the vendored files may have been reverted, or this run raced the merge. Check upstream before vendoring by hand (npm run vendor -- ${TAG})."
+            exit 1
+          fi
           if [ "$rejected" != "0" ]; then
             # closing the PR rejects the tag; its branch is left alone, so reopening undoes it
             echo "::warning::the pull request from ${branch} was closed, so ${TAG} is not vendored; reopen it (restore its branch first if it was deleted) to take ${TAG} after all"
-            exit 0
-          fi
-          if [ "$merged" != "0" ]; then
-            # merged, yet this run saw a change: upstream moved the tag to another commit
-            echo "::warning::${TAG} was vendored before, but the tag now points to ${COMMIT}; vendor it again by hand if that is wanted"
             exit 0
           fi
           # upstream/* branches belong to this workflow: replace whatever an earlier,
