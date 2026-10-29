@@ -27,7 +27,7 @@ const PLUGIN_JSON = path.join(
 );
 const SCRIPTS_DIR = path.join(ROOT, "plugins/mission-control/scripts");
 const SHA_RE = /^[0-9a-f]{40}$/u;
-const REPO_RE = /^[\w-]+\/[\w.-]+$/u;
+const REPO_RE = /^[\w-]+\/(?!\.{1,2}$)[\w.-]+$/u;
 // no leading zeros: v02.3.0 must not pass as a release other than v2.3.0
 const TAG_RE = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const VERSION_FIELD_RE =
@@ -58,6 +58,9 @@ interface Upstream {
   repo: string;
   tag: string;
   commit: string;
+  // every tag vendored before, with its commit then: a tag that now points elsewhere
+  // is refused, including after a rollback past it
+  known?: Record<string, string>;
 }
 
 const github = async (route: string): Promise<unknown> => {
@@ -171,8 +174,20 @@ const readPinned = (): Upstream => {
   ) {
     throw new Error(`unexpected repo, tag or commit in ${UPSTREAM_JSON}`);
   }
+  const known = Object.entries(current.known ?? {});
+  if (!known.every(([t, sha]) => TAG_RE.test(t) && SHA_RE.test(sha))) {
+    throw new Error(`unexpected entry in "known" in ${UPSTREAM_JSON}`);
+  }
   return current;
 };
+
+const ROLL_BACK =
+  "roll back with: npm run vendor -- <older tag> --accept-moved (check that tag's commit too)";
+
+const movedError = (tag: string, from: string, to: string) =>
+  new Error(
+    `upstream moved ${tag} from ${from} to ${to}; check upstream, then take it with: npm run vendor -- ${tag} --accept-moved, or ${ROLL_BACK}`
+  );
 
 const NOT_FOUND_RE = /HTTP (?:404|422)$/u;
 
@@ -180,25 +195,20 @@ const NOT_FOUND_RE = /HTTP (?:404|422)$/u;
 // upstream compromise: refuse to go on until someone checks and takes a tag on
 // purpose with --accept-moved. Returns the vendored tag's current commit.
 const checkVendoredTag = async (current: Upstream): Promise<string> => {
-  const way =
-    `check upstream, then take it with: npm run vendor -- ${current.tag} --accept-moved` +
-    ", or roll back with: npm run vendor -- <older tag> --accept-moved";
   let sha: string;
   try {
     sha = await commitOf(current.repo, current.tag);
   } catch (error) {
     if (error instanceof Error && NOT_FOUND_RE.test(error.message)) {
       throw new Error(
-        `the vendored ${current.tag} no longer exists upstream; ${way}`,
+        `the vendored ${current.tag} no longer exists upstream, or ${current.repo} is not reachable; check upstream, then ${ROLL_BACK}`,
         { cause: error }
       );
     }
     throw error;
   }
   if (sha !== current.commit) {
-    throw new Error(
-      `upstream moved ${current.tag} from ${current.commit} to ${sha}; ${way}`
-    );
+    throw movedError(current.tag, current.commit, sha);
   }
   return sha;
 };
@@ -229,6 +239,11 @@ const main = async () => {
     tag === current.tag && vendoredSha
       ? vendoredSha
       : await commitOf(current.repo, tag);
+  // a tag vendored before must still point to the commit it had then
+  const recorded = tag === current.tag ? current.commit : current.known?.[tag];
+  if (recorded && recorded !== sha && !acceptMoved) {
+    throw movedError(tag, recorded, sha);
+  }
 
   // compute every output before writing any, so a failure leaves no mixed state
   const contents = await Promise.all(
@@ -248,7 +263,20 @@ const main = async () => {
     outputs.push(
       [
         UPSTREAM_JSON,
-        `${JSON.stringify({ ...current, commit: sha, tag }, null, 2)}\n`,
+        `${JSON.stringify(
+          {
+            ...current,
+            commit: sha,
+            known: {
+              ...current.known,
+              [current.tag]: current.commit,
+              [tag]: sha,
+            },
+            tag,
+          },
+          null,
+          2
+        )}\n`,
       ],
       [PLUGIN_JSON, bumpPatchVersion(readFileSync(PLUGIN_JSON, "utf-8"))]
     );

@@ -50,7 +50,7 @@ afterAll(() => {
 // A copy of the files the script reads and writes, pinned to v2.3.0 at VENDORED.
 const DEFAULT_PIN = { commit: VENDORED, repo: "o/r", tag: "v2.3.0" };
 
-const workspace = (pin: Record<string, string> = DEFAULT_PIN) => {
+const workspace = (pin: Record<string, unknown> = DEFAULT_PIN) => {
   const dir = mkdtempSync(path.join(tmpdir(), "mc-vendor-"));
   dirs.push(dir);
   const manifest = "plugins/mission-control/.claude-plugin/plugin.json";
@@ -79,6 +79,7 @@ const workspace = (pin: Record<string, string> = DEFAULT_PIN) => {
     },
     pinned: () =>
       JSON.parse(read("upstream.json")) as { tag: string; commit: string },
+    read,
     run: (args: string[], env: Record<string, string> = {}) =>
       runScript(path.join(dir, "scripts/vendor-upstream.ts"), args, {
         env: { GITHUB_OUTPUT: path.join(dir, "outputs"), ...env },
@@ -112,7 +113,11 @@ describe("vendor-upstream", () => {
     const ws = workspace();
     const r = await ws.run(["v2.3.0", "--accept-moved"], { MOVED: "1" });
     expect(r.code, r.stderr).toBe(0);
-    expect(ws.pinned()).toEqual({ commit: MOVED, repo: "o/r", tag: "v2.3.0" });
+    expect(ws.pinned()).toMatchObject({
+      commit: MOVED,
+      repo: "o/r",
+      tag: "v2.3.0",
+    });
     expect(ws.outputs()).toContain("changed=true");
   });
 
@@ -144,7 +149,11 @@ describe("vendor-upstream", () => {
     const before = ws.version();
     const r = await ws.run(["--latest"], { LATEST: "v2.4.0", MOVED: "1" });
     expect(r.code, r.stderr).toBe(0);
-    expect(ws.pinned()).toEqual({ commit: NEWER, repo: "o/r", tag: "v2.4.0" });
+    expect(ws.pinned()).toMatchObject({
+      commit: NEWER,
+      repo: "o/r",
+      tag: "v2.4.0",
+    });
     expect(ws.version()).not.toBe(before);
   });
 
@@ -163,7 +172,7 @@ describe("vendor-upstream", () => {
     const accepted = workspace();
     const a = await accepted.run(["v2.2.0", "--accept-moved"], { MOVED: "1" });
     expect(a.code, a.stderr).toBe(0);
-    expect(accepted.pinned()).toEqual({
+    expect(accepted.pinned()).toMatchObject({
       commit: OLDER,
       repo: "o/r",
       tag: "v2.2.0",
@@ -187,11 +196,46 @@ describe("vendor-upstream", () => {
     expect(rollback.pinned().tag).toBe("v2.2.0");
   });
 
-  test("refuses an invalid upstream.json", async () => {
-    const ws = workspace({ commit: VENDORED, repo: "o/r/../x", tag: "v2.3.0" });
+  test("keeps refusing a tag after rolling back past it", async () => {
+    const ws = workspace();
+    const back = await ws.run(["v2.2.0", "--accept-moved"], { MOVED: "1" });
+    expect(back.code, back.stderr).toBe(0);
+    expect(JSON.parse(ws.read("upstream.json")).known).toEqual({
+      "v2.2.0": OLDER,
+      "v2.3.0": VENDORED,
+    });
+
+    // v2.3.0 is newer than the rolled-back pin, but still moved
+    const r = await ws.run(["--latest"], { LATEST: "v2.3.0", MOVED: "1" });
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/upstream moved v2\.3\.0 from a{40} to b{40}/u);
+    expect(ws.pinned().tag).toBe("v2.2.0");
+  });
+
+  test("does not offer taking a vendored tag that was removed", async () => {
+    const ws = workspace();
+    const r = await ws.run([], { DELETED: "1" });
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/no longer exists upstream.*roll back with/u);
+    expect(r.stderr).not.toMatch(/take it with/u);
+  });
+
+  test.each([
+    [{ commit: VENDORED, repo: "o/r/../x", tag: "v2.3.0" }],
+    [{ commit: VENDORED, repo: "o/..", tag: "v2.3.0" }],
+    [{ commit: VENDORED, repo: "o/r", tag: "v2.3" }],
+  ])("refuses an invalid upstream.json %j", async (pin) => {
+    const ws = workspace(pin);
     const r = await ws.run([]);
     expect(r.code).toBe(1);
     expect(r.stderr).toMatch(/unexpected repo, tag or commit/u);
+  });
+
+  test("refuses an invalid known entry in upstream.json", async () => {
+    const ws = workspace({ ...DEFAULT_PIN, known: { "v2.2.0": "nope" } });
+    const r = await ws.run([]);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/unexpected entry in "known"/u);
   });
 
   test.each([
