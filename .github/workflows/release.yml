@@ -21,11 +21,11 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Tag is on main and matches package.json
+      - name: Tag is on master and matches package.json
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/master
           test "$TAG" = "v$(node -p 'require("./package.json").version')"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:

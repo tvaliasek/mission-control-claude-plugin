@@ -84,7 +84,7 @@ curl -fsSLO https://raw.githubusercontent.com/tvaliasek/mission-control-claude-p
 node mc-enroll.cjs --url https://mc.example.com --agent build-box --print
 ```
 
-Download from a release tag, not `main`, and read the script before giving it your admin key. It prints only the agent key (`mca_…`). On the agent machine, install the plugin and enter that key as `mc_api_key` and `build-box` as `agent_name` (Copilot CLI: export it as `MC_API_KEY` and `MC_AGENT_NAME=build-box`).
+Download from a release tag, not `master`, and read the script before giving it your admin key. It prints only the agent key (`mca_…`). On the agent machine, install the plugin and enter that key as `mc_api_key` and `build-box` as `agent_name` (Copilot CLI: export it as `MC_API_KEY` and `MC_AGENT_NAME=build-box`).
 
 **Alternative: enroll on the agent machine** (Claude Code only). Install the plugin, then run the same script without `--print`. It saves URL, agent key and agent name with `claude plugin configure mission-control@mission-control --values-stdin`. The admin key is typed on that machine, so use this only where that is acceptable. If `claude` cannot be started (for example the npm `claude.cmd` shim on Windows), the script prints the key instead and exits 1; enter it with `/plugin configure`.
 
@@ -120,7 +120,7 @@ The tests run against the built files in `plugins/mission-control/scripts/` and 
 ### Releasing
 
 1. Bump `version` in `package.json`, commit, and push a matching tag: `git tag v0.2.0 && git push origin v0.2.0`.
-2. The **Release** workflow checks that the tagged commit is on `main` and matches the version, runs all checks in a job without publish credentials, then a separate job (GitHub environment `npm`) publishes the tested build `mission-control-claude-plugin` to npm through [trusted publishing](https://docs.npmjs.com/trusted-publishers), with provenance and no stored npm token.
+2. The **Release** workflow checks that the tagged commit is on `master` and matches the version, runs all checks in a job without publish credentials, then a separate job (GitHub environment `npm`) publishes the tested build `mission-control-claude-plugin` to npm through [trusted publishing](https://docs.npmjs.com/trusted-publishers), with provenance and no stored npm token.
 
 The trusted publisher is configured in the package's settings on npmjs.com, so the package must exist first: publish the first version manually (`npm run build && npm publish --access public`), then add a trusted publisher for this repository with the workflow file `release.yml` and the environment `npm`. The first publish through it must happen within 2 days. Adding required reviewers to the `npm` environment in the repository settings makes every release wait for approval.
 

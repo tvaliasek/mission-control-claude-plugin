@@ -59,7 +59,7 @@ jobs:
           fi
           # a rerun after a failed `gh pr create` finds the branch and still opens the PR
           if [ "$(gh pr list --head "$branch" --state all --json number --jq length)" = "0" ]; then
-            gh pr create --base main --head "$branch" \
+            gh pr create --base master --head "$branch" \
               --title "Vendor Mission Control ${TAG}" \
               --body "Re-vendors scripts/mc-mcp-server.cjs and mc-base-url.cjs from builderz-labs/mission-control ${TAG}, re-applies the loadConfig patch and bumps the plugin version. Review the upstream diff for new tools or changed endpoints before merging."
           fi
