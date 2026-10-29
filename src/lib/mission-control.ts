@@ -1,24 +1,34 @@
 import { fail, log } from "./cli.ts";
 
 const NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$/u;
-const DIGITS_RE = /^\d+$/u;
 // Printable ASCII only: anything else is rejected by fetch with an error that echoes the value
 const KEY_RE = /^[!-~]+$/u;
 const TRAILING_SLASHES_RE = /\/+$/u;
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const REQUEST_TIMEOUT_MS = 30_000;
 const HTTP_NOT_FOUND = 404;
+const HTTP_UNAUTHORIZED = 401;
+const HTTP_FORBIDDEN = 403;
+const DAY_MS = 86_400_000;
+// Control, format (bidi, zero-width, tag) and line/paragraph separator characters:
+// server text must not drive the terminal or change what it shows
+const CONTROL_CHARS_RE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
 
-// all-digit names are rejected because Mission Control resolves them as agent ids
+// Text from the server, made safe to print.
+const printable = (value: unknown) =>
+  String(value).replaceAll(CONTROL_CHARS_RE, "?");
+
+// names that read as a number (e.g. 42, 1e3) are rejected because Mission Control
+// resolves them as agent ids
 export const isValidAgentName = (name: string) =>
-  NAME_RE.test(name) && !DIGITS_RE.test(name);
+  NAME_RE.test(name) && Number.isNaN(Number(name));
 
 export const AGENT_NAME_RULES =
-  "1-63 letters, digits, dots, hyphens or underscores, starting with a letter or digit, not only digits";
+  "1-63 letters, digits, dots, hyphens or underscores, starting with a letter or digit, not a number";
 
-export const checkKey = (key: string, what: string): string => {
-  if (!key) {
-    fail(`${what} is empty`);
+export const checkKey = (key: unknown, what: string): string => {
+  if (typeof key !== "string" || !key) {
+    return fail(`${what} is empty or not a string`);
   }
   if (!KEY_RE.test(key)) {
     fail(`${what} contains invalid characters`);
@@ -26,7 +36,7 @@ export const checkKey = (key: string, what: string): string => {
   return key;
 };
 
-// Same rules as the bundled mc-base-url.cjs, inlined so each built script stands alone.
+// Checks the URL the user typed: absolute HTTP(S), no credentials, query or fragment.
 export const normalizeUrl = (value: string): string => {
   let parsed: URL;
   try {
@@ -43,10 +53,41 @@ export const normalizeUrl = (value: string): string => {
   if (parsed.search || parsed.hash) {
     fail("Mission Control URL must not contain a query string or fragment");
   }
-  if (parsed.protocol === "http:" && !LOCAL_HOSTS.has(parsed.hostname)) {
-    log("warning: plain HTTP sends API keys unencrypted");
-  }
   return parsed.toString().replace(TRAILING_SLASHES_RE, "");
+};
+
+const sameUrl = (a: string, b: string) => {
+  try {
+    const href = (value: string) =>
+      new URL(value).href.replace(TRAILING_SLASHES_RE, "");
+    return href(a) === href(b);
+  } catch {
+    return false;
+  }
+};
+
+// A key from the environment goes only to the URL exported with it (MC_URL), so a
+// key for one instance is never sent to another.
+export const envKey = (
+  name: "MC_API_KEY" | "MC_ADMIN_API_KEY",
+  url: string
+): string | undefined => {
+  const key = process.env[name]?.trim();
+  if (!key) {
+    return;
+  }
+  if (!sameUrl(process.env.MC_URL?.trim() ?? "", url)) {
+    log(`ignoring ${name} from the environment: MC_URL is not ${url}`);
+    return;
+  }
+  log(`using ${name} from the environment`);
+  return key;
+};
+
+// Plain HTTP to another machine sends API keys unencrypted.
+export const isRemotePlainHttp = (url: string) => {
+  const parsed = new URL(url);
+  return parsed.protocol === "http:" && !LOCAL_HOSTS.has(parsed.hostname);
 };
 
 interface ApiResult {
@@ -81,10 +122,15 @@ const api = async (
     });
   } catch (error) {
     // fetch error messages can contain header values, so report only the cause code
-    const err = (error ?? {}) as { name?: string; cause?: { code?: string } };
-    return fail(
-      `${method} ${route} failed: ${err.cause?.code ?? err.name ?? "network error"} (redirects are not followed)`
-    );
+    const err = (error ?? {}) as {
+      name?: string;
+      cause?: { code?: string; message?: string };
+    };
+    const reason =
+      err.cause?.message === "unexpected redirect"
+        ? "the server answered with a redirect, which is not followed so the key goes only to this URL"
+        : (err.cause?.code ?? err.name ?? "network error");
+    return fail(`${method} ${route} failed: ${reason}`);
   }
   const text = await res.text();
   let data: Record<string, unknown> = {};
@@ -99,15 +145,16 @@ const api = async (
 const checked = <T>(method: string, route: string, result: ApiResult): T => {
   if (!result.ok) {
     const detail =
-      typeof result.data.error === "string" ? ` ${result.data.error}` : "";
+      typeof result.data.error === "string"
+        ? ` ${printable(result.data.error)}`
+        : "";
     fail(`${method} ${route} failed: HTTP ${result.status}${detail}`);
   }
   return result.data as T;
 };
 
-interface RegisterResponse {
+interface AgentResponse {
   agent?: { id?: number | string; name?: string };
-  registered?: boolean;
 }
 
 interface KeyResponse {
@@ -128,39 +175,53 @@ export interface EnrollOptions {
   existingHint: string;
 }
 
+// The agent's id, after checking the response names the agent we asked for.
+const agentIdOf = (
+  response: AgentResponse,
+  agent: string,
+  route: string
+): string => {
+  const id = response.agent?.id;
+  if (
+    (typeof id !== "number" && typeof id !== "string") ||
+    response.agent?.name !== agent
+  ) {
+    return fail(`unexpected response from ${route}`);
+  }
+  return String(id);
+};
+
 // Registers the agent with the admin key and issues it an operator-scoped key.
 export const enrollAgent = async (opts: EnrollOptions): Promise<string> => {
-  // look up first: registering an existing agent would reset its status to idle
   const agentRoute = `/api/agents/${encodeURIComponent(opts.agent)}`;
   const lookup = await api(opts.url, opts.adminKey, "GET", agentRoute);
-  if (lookup.status !== HTTP_NOT_FOUND) {
-    checked("GET", agentRoute, lookup);
+  let agentId: string;
+  if (lookup.status === HTTP_NOT_FOUND) {
+    const registerRoute = "/api/agents/register";
+    const reg = checked<AgentResponse>(
+      "POST",
+      registerRoute,
+      await api(opts.url, opts.adminKey, "POST", registerRoute, {
+        framework: opts.framework,
+        name: opts.agent,
+      })
+    );
+    agentId = agentIdOf(reg, opts.agent, registerRoute);
+    log(`agent "${opts.agent}" registered (id ${printable(agentId)})`);
+  } else {
+    const existing = checked<AgentResponse>("GET", agentRoute, lookup);
     if (!(await opts.allowExisting())) {
       fail(
         `agent "${opts.agent}" already exists; not issuing it another key${opts.existingHint}`
       );
     }
+    // not registered again: that would reset a working agent's status to idle
+    agentId = agentIdOf(existing, opts.agent, agentRoute);
+    log(`agent "${opts.agent}" exists (id ${printable(agentId)})`);
   }
-
-  const registerRoute = "/api/agents/register";
-  const reg = checked<RegisterResponse>(
-    "POST",
-    registerRoute,
-    await api(opts.url, opts.adminKey, "POST", registerRoute, {
-      framework: opts.framework,
-      name: opts.agent,
-    })
-  );
-  const agentId = reg.agent?.id;
-  if (agentId === undefined || agentId === null) {
-    fail(`unexpected response from ${registerRoute}`);
-  }
-  log(
-    `agent "${reg.agent?.name}" ${reg.registered ? "registered" : "exists"} (id ${agentId})`
-  );
 
   // operator is the lowest role that can connect, heartbeat, poll the queue and update tasks
-  const keysRoute = `/api/agents/${agentId}/keys`;
+  const keysRoute = `/api/agents/${encodeURIComponent(agentId)}/keys`;
   const issued = checked<KeyResponse>(
     "POST",
     keysRoute,
@@ -170,13 +231,13 @@ export const enrollAgent = async (opts: EnrollOptions): Promise<string> => {
       scopes: ["operator"],
     })
   );
-  if (!issued.api_key) {
-    return fail("unexpected response from the key endpoint");
-  }
+  const expires = new Date(Date.now() + opts.expiresDays * DAY_MS);
+  // logged first, so a key refused below can still be found and revoked by its id
   log(
-    `issued key ${issued.key?.key_prefix ?? ""}… (id ${issued.key?.id ?? "?"}), expires in ${opts.expiresDays} days`
+    `issued key ${printable(issued.key?.key_prefix ?? "")}… (id ${printable(issued.key?.id ?? "?")}), expires on ${expires.toISOString().slice(0, 10)}; issue a new one before then`
   );
-  return issued.api_key;
+  // it is printed into shell export lines and saved as a header value
+  return checkKey(issued.api_key, "issued key");
 };
 
 // Checks that the key is an agent key of this agent: Mission Control rejects an
@@ -191,11 +252,20 @@ export const verifyKey = async (url: string, key: string, agent: string) => {
     );
   }
   checked("GET", route, result);
+  // fails closed: only a refusal proves the key can't list keys, i.e. is not admin
   const keysRoute = `${route}/keys`;
   const asAdmin = await api(url, key, "GET", keysRoute);
   if (asAdmin.ok) {
     fail(
       "this is an admin key; give the agent an agent-scoped key (answer yes to issuing a new key)"
+    );
+  }
+  if (
+    asAdmin.status !== HTTP_UNAUTHORIZED &&
+    asAdmin.status !== HTTP_FORBIDDEN
+  ) {
+    fail(
+      `could not check that this is not an admin key: GET ${keysRoute} answered HTTP ${asAdmin.status}`
     );
   }
   log(`key accepted for agent "${agent}"`);

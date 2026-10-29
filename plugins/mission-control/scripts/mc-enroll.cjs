@@ -18,6 +18,8 @@ const cli_fail = (message)=>{
     cli_log(message);
     process.exit(1);
 };
+// For errors nobody expected: the message can contain secrets, the name can't.
+const failUnexpected = (error)=>cli_fail(`unexpected error: ${error instanceof Error ? error.name : typeof error}`);
 // Characters typed or pasted after a line ending, kept for the next prompt.
 let pending = [];
 // Escape sequences such as arrow keys (ESC [ D) are dropped: after ESC, a [ or O
@@ -79,7 +81,8 @@ const readLine = async (stdin, echo)=>{
     const consume = (chars)=>{
         for(let i = 0; i < chars.length; i += 1){
             if (applyChar(stdin, state, chars[i] ?? "", echo)) {
-                pending = chars.slice(i + 1);
+                // the rest of a pasted secret must not reach the next, echoed prompt
+                pending = echo ? chars.slice(i + 1) : [];
                 return true;
             }
         }
@@ -144,10 +147,18 @@ const createPrompter = async ()=>{
         };
     }
     const ask = async (question, fallback)=>withDefault(await read(`${question}${fallback ? ` [${fallback}]` : ""}: `), fallback);
+    // strict, so piped answers that are out of step fail instead of counting as yes
     const confirm = async (question, fallback)=>{
         const raw = await read(`${question} ${fallback ? "[Y/n]" : "[y/N]"} `);
         const answer = raw.trim().toLowerCase();
-        return answer ? answer.startsWith("y") : fallback;
+        if (!answer) {
+            return fallback;
+        }
+        if (answer !== "y" && answer !== "yes" && answer !== "n" && answer !== "no") {
+            // not echoed: an out-of-step piped line could be anything, e.g. a key
+            return cli_fail("answer y or n");
+        }
+        return answer.startsWith("y");
     };
     return {
         ask,
@@ -175,6 +186,8 @@ const external_node_child_process_namespaceObject = require("node:child_process"
 
 const MARKETPLACE_REPO = "tvaliasek/mission-control-claude-plugin";
 const PLUGIN_ID = "mission-control@mission-control";
+// marketplace add clones a git repository, so allow for a slow network
+const CLIENT_TIMEOUT_MS = 300000;
 // Runs a client CLI without passing on keys from our own environment.
 const run = (command, args, input)=>{
     const env = {
@@ -190,7 +203,8 @@ const run = (command, args, input)=>{
             "pipe",
             "pipe",
             "pipe"
-        ]
+        ],
+        timeout: CLIENT_TIMEOUT_MS
     });
     if (result.error) {
         const { code } = result.error;
@@ -262,7 +276,6 @@ const installCopilot = ()=>{
 ;// CONCATENATED MODULE: ./src/lib/mission-control.ts
 
 const NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$/u;
-const DIGITS_RE = /^\d+$/u;
 // Printable ASCII only: anything else is rejected by fetch with an error that echoes the value
 const KEY_RE = /^[!-~]+$/u;
 const TRAILING_SLASHES_RE = /\/+$/u;
@@ -273,19 +286,28 @@ const LOCAL_HOSTS = new Set([
 ]);
 const REQUEST_TIMEOUT_MS = 30000;
 const HTTP_NOT_FOUND = 404;
-// all-digit names are rejected because Mission Control resolves them as agent ids
-const isValidAgentName = (name)=>NAME_RE.test(name) && !DIGITS_RE.test(name);
-const AGENT_NAME_RULES = "1-63 letters, digits, dots, hyphens or underscores, starting with a letter or digit, not only digits";
+const HTTP_UNAUTHORIZED = 401;
+const HTTP_FORBIDDEN = 403;
+const DAY_MS = 86400000;
+// Control, format (bidi, zero-width, tag) and line/paragraph separator characters:
+// server text must not drive the terminal or change what it shows
+const CONTROL_CHARS_RE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+// Text from the server, made safe to print.
+const printable = (value)=>String(value).replaceAll(CONTROL_CHARS_RE, "?");
+// names that read as a number (e.g. 42, 1e3) are rejected because Mission Control
+// resolves them as agent ids
+const isValidAgentName = (name)=>NAME_RE.test(name) && Number.isNaN(Number(name));
+const AGENT_NAME_RULES = "1-63 letters, digits, dots, hyphens or underscores, starting with a letter or digit, not a number";
 const checkKey = (key, what)=>{
-    if (!key) {
-        cli_fail(`${what} is empty`);
+    if (typeof key !== "string" || !key) {
+        return cli_fail(`${what} is empty or not a string`);
     }
     if (!KEY_RE.test(key)) {
         cli_fail(`${what} contains invalid characters`);
     }
     return key;
 };
-// Same rules as the bundled mc-base-url.cjs, inlined so each built script stands alone.
+// Checks the URL the user typed: absolute HTTP(S), no credentials, query or fragment.
 const normalizeUrl = (value)=>{
     let parsed;
     try {
@@ -302,10 +324,34 @@ const normalizeUrl = (value)=>{
     if (parsed.search || parsed.hash) {
         cli_fail("Mission Control URL must not contain a query string or fragment");
     }
-    if (parsed.protocol === "http:" && !LOCAL_HOSTS.has(parsed.hostname)) {
-        cli_log("warning: plain HTTP sends API keys unencrypted");
-    }
     return parsed.toString().replace(TRAILING_SLASHES_RE, "");
+};
+const sameUrl = (a, b)=>{
+    try {
+        const href = (value)=>new URL(value).href.replace(TRAILING_SLASHES_RE, "");
+        return href(a) === href(b);
+    } catch  {
+        return false;
+    }
+};
+// A key from the environment goes only to the URL exported with it (MC_URL), so a
+// key for one instance is never sent to another.
+const envKey = (name, url)=>{
+    const key = process.env[name]?.trim();
+    if (!key) {
+        return;
+    }
+    if (!sameUrl(process.env.MC_URL?.trim() ?? "", url)) {
+        cli_log(`ignoring ${name} from the environment: MC_URL is not ${url}`);
+        return;
+    }
+    cli_log(`using ${name} from the environment`);
+    return key;
+};
+// Plain HTTP to another machine sends API keys unencrypted.
+const isRemotePlainHttp = (url)=>{
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" && !LOCAL_HOSTS.has(parsed.hostname);
 };
 const api = async (baseUrl, apiKey, method, route, body, agentName)=>{
     let res;
@@ -329,7 +375,8 @@ const api = async (baseUrl, apiKey, method, route, body, agentName)=>{
     } catch (error) {
         // fetch error messages can contain header values, so report only the cause code
         const err = error ?? {};
-        return cli_fail(`${method} ${route} failed: ${err.cause?.code ?? err.name ?? "network error"} (redirects are not followed)`);
+        const reason = err.cause?.message === "unexpected redirect" ? "the server answered with a redirect, which is not followed so the key goes only to this URL" : err.cause?.code ?? err.name ?? "network error";
+        return cli_fail(`${method} ${route} failed: ${reason}`);
     }
     const text = await res.text();
     let data = {};
@@ -346,34 +393,43 @@ const api = async (baseUrl, apiKey, method, route, body, agentName)=>{
 };
 const checked = (method, route, result)=>{
     if (!result.ok) {
-        const detail = typeof result.data.error === "string" ? ` ${result.data.error}` : "";
+        const detail = typeof result.data.error === "string" ? ` ${printable(result.data.error)}` : "";
         cli_fail(`${method} ${route} failed: HTTP ${result.status}${detail}`);
     }
     return result.data;
 };
+// The agent's id, after checking the response names the agent we asked for.
+const agentIdOf = (response, agent, route)=>{
+    const id = response.agent?.id;
+    if (typeof id !== "number" && typeof id !== "string" || response.agent?.name !== agent) {
+        return cli_fail(`unexpected response from ${route}`);
+    }
+    return String(id);
+};
 // Registers the agent with the admin key and issues it an operator-scoped key.
 const enrollAgent = async (opts)=>{
-    // look up first: registering an existing agent would reset its status to idle
     const agentRoute = `/api/agents/${encodeURIComponent(opts.agent)}`;
     const lookup = await api(opts.url, opts.adminKey, "GET", agentRoute);
-    if (lookup.status !== HTTP_NOT_FOUND) {
-        checked("GET", agentRoute, lookup);
+    let agentId;
+    if (lookup.status === HTTP_NOT_FOUND) {
+        const registerRoute = "/api/agents/register";
+        const reg = checked("POST", registerRoute, await api(opts.url, opts.adminKey, "POST", registerRoute, {
+            framework: opts.framework,
+            name: opts.agent
+        }));
+        agentId = agentIdOf(reg, opts.agent, registerRoute);
+        cli_log(`agent "${opts.agent}" registered (id ${printable(agentId)})`);
+    } else {
+        const existing = checked("GET", agentRoute, lookup);
         if (!await opts.allowExisting()) {
             cli_fail(`agent "${opts.agent}" already exists; not issuing it another key${opts.existingHint}`);
         }
+        // not registered again: that would reset a working agent's status to idle
+        agentId = agentIdOf(existing, opts.agent, agentRoute);
+        cli_log(`agent "${opts.agent}" exists (id ${printable(agentId)})`);
     }
-    const registerRoute = "/api/agents/register";
-    const reg = checked("POST", registerRoute, await api(opts.url, opts.adminKey, "POST", registerRoute, {
-        framework: opts.framework,
-        name: opts.agent
-    }));
-    const agentId = reg.agent?.id;
-    if (agentId === undefined || agentId === null) {
-        cli_fail(`unexpected response from ${registerRoute}`);
-    }
-    cli_log(`agent "${reg.agent?.name}" ${reg.registered ? "registered" : "exists"} (id ${agentId})`);
     // operator is the lowest role that can connect, heartbeat, poll the queue and update tasks
-    const keysRoute = `/api/agents/${agentId}/keys`;
+    const keysRoute = `/api/agents/${encodeURIComponent(agentId)}/keys`;
     const issued = checked("POST", keysRoute, await api(opts.url, opts.adminKey, "POST", keysRoute, {
         expires_in_days: opts.expiresDays,
         name: opts.keyName,
@@ -381,11 +437,11 @@ const enrollAgent = async (opts)=>{
             "operator"
         ]
     }));
-    if (!issued.api_key) {
-        return cli_fail("unexpected response from the key endpoint");
-    }
-    cli_log(`issued key ${issued.key?.key_prefix ?? ""}… (id ${issued.key?.id ?? "?"}), expires in ${opts.expiresDays} days`);
-    return issued.api_key;
+    const expires = new Date(Date.now() + opts.expiresDays * DAY_MS);
+    // logged first, so a key refused below can still be found and revoked by its id
+    cli_log(`issued key ${printable(issued.key?.key_prefix ?? "")}… (id ${printable(issued.key?.id ?? "?")}), expires on ${expires.toISOString().slice(0, 10)}; issue a new one before then`);
+    // it is printed into shell export lines and saved as a header value
+    return checkKey(issued.api_key, "issued key");
 };
 // Checks that the key is an agent key of this agent: Mission Control rejects an
 // agent key whose agent differs from x-agent-name, and only an admin key can list
@@ -397,10 +453,14 @@ const verifyKey = async (url, key, agent)=>{
         fail(`Mission Control has no agent "${agent}"; an agent key belongs to an existing agent, check the name`);
     }
     checked("GET", route, result);
+    // fails closed: only a refusal proves the key can't list keys, i.e. is not admin
     const keysRoute = `${route}/keys`;
     const asAdmin = await api(url, key, "GET", keysRoute);
     if (asAdmin.ok) {
         fail("this is an admin key; give the agent an agent-scoped key (answer yes to issuing a new key)");
+    }
+    if (asAdmin.status !== HTTP_UNAUTHORIZED && asAdmin.status !== HTTP_FORBIDDEN) {
+        fail(`could not check that this is not an admin key: GET ${keysRoute} answered HTTP ${asAdmin.status}`);
     }
     log(`key accepted for agent "${agent}"`);
 };
@@ -421,8 +481,10 @@ const verifyKey = async (url, key, agent)=>{
    --expires-days N     Key lifetime in days, 1-3650 (default: 90)
    --existing           Allow issuing a key for an agent that already exists
    --print              Print the agent key instead of configuring the local plugin
+   --allow-http         Allow a plain-HTTP URL to another machine (keys unencrypted)
 
- The admin key is read from MC_ADMIN_API_KEY or prompted for without echo.
+ The admin key is read from MC_ADMIN_API_KEY (only when MC_URL names the same URL
+ as --url) or prompted for without echo.
  It is never written anywhere. Without --print, the agent key is saved with
  `claude plugin configure mission-control@mission-control --values-stdin`.
 
@@ -437,6 +499,7 @@ const parseArgs = (argv)=>{
     let url;
     let agent;
     const opts = {
+        allowHttp: false,
         existing: false,
         expiresDays: DEFAULT_EXPIRES_DAYS,
         keyName: (0,external_node_os_namespaceObject.hostname)(),
@@ -446,7 +509,8 @@ const parseArgs = (argv)=>{
         const arg = argv[i];
         const value = ()=>{
             const next = argv[i + 1];
-            if (next === undefined) {
+            // e.g. "--key-name --print" would otherwise swallow --print
+            if (next === undefined || next.startsWith("--")) {
                 return cli_fail(`${arg} needs a value`);
             }
             i += 1;
@@ -483,10 +547,15 @@ const parseArgs = (argv)=>{
                     opts.print = true;
                     break;
                 }
+            case "--allow-http":
+                {
+                    opts.allowHttp = true;
+                    break;
+                }
             case "-h":
             case "--help":
                 {
-                    process.stdout.write("Usage: node mc-enroll.cjs --url URL --agent NAME [--key-name NAME] [--expires-days N] [--existing] [--print]\n");
+                    process.stdout.write("Usage: node mc-enroll.cjs --url URL --agent NAME [--key-name NAME] [--expires-days N] [--existing] [--print] [--allow-http]\n");
                     process.exit(0);
                     break;
                 }
@@ -505,16 +574,20 @@ const parseArgs = (argv)=>{
     if (!Number.isInteger(opts.expiresDays) || opts.expiresDays < 1 || opts.expiresDays > MAX_EXPIRES_DAYS) {
         cli_fail(`--expires-days must be an integer between 1 and ${MAX_EXPIRES_DAYS}`);
     }
+    const normalized = normalizeUrl(url);
+    if (isRemotePlainHttp(normalized) && !opts.allowHttp) {
+        cli_fail("plain HTTP would send API keys unencrypted; use HTTPS or pass --allow-http");
+    }
     return {
         ...opts,
         agent,
-        url: normalizeUrl(url)
+        url: normalized
     };
 };
 const main = async ()=>{
     setProgram("mc-enroll");
     const opts = parseArgs(process.argv.slice(2));
-    const adminKey = checkKey(process.env.MC_ADMIN_API_KEY?.trim() || await promptHidden("Mission Control admin API key: ", "MC_ADMIN_API_KEY"), "admin API key");
+    const adminKey = checkKey(envKey("MC_ADMIN_API_KEY", opts.url) ?? await promptHidden("Mission Control admin API key: ", "MC_ADMIN_API_KEY and MC_URL"), "admin API key");
     const agentKey = await enrollAgent({
         adminKey,
         agent: opts.agent,
@@ -544,7 +617,7 @@ const main = async ()=>{
     cli_log(`start a new Claude Code session to use ${PLUGIN_ID}`);
 };
 const mc_enroll_finished = guardUnfinished();
-main().then(mc_enroll_finished).catch(()=>cli_fail("unexpected error"));
+main().then(mc_enroll_finished).catch(failUnexpected);
 
 for(var __rspack_i in __webpack_exports__) {
   exports[__rspack_i] = __webpack_exports__[__rspack_i];

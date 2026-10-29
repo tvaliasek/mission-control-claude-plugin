@@ -20,8 +20,15 @@ const SCRIPT = builtScript(
 
 afterAll(removeTempDirs);
 
+// MC_URL names the --url instance, which an admin key from the environment requires.
 const run = (args: string[], env: Record<string, string> = {}) =>
-  runScript(SCRIPT, args, { env: { MC_ADMIN_API_KEY: ADMIN_KEY, ...env } });
+  runScript(SCRIPT, args, {
+    env: {
+      MC_ADMIN_API_KEY: ADMIN_KEY,
+      MC_URL: args[args.indexOf("--url") + 1] ?? "",
+      ...env,
+    },
+  });
 
 describe("mc-enroll", () => {
   test("--print registers the agent and prints only the agent key", async () => {
@@ -79,6 +86,11 @@ describe("mc-enroll", () => {
       ]);
       expect(allowed.code, allowed.stderr).toBe(0);
       expect(allowed.stdout).toBe(`${ISSUED_KEY}\n`);
+      // registering again would reset the working agent's status
+      expect(srv.requests.slice(1).map((q) => `${q.method} ${q.url}`)).toEqual([
+        "GET /api/agents/build-box",
+        "POST /api/agents/7/keys",
+      ]);
     } finally {
       srv.close();
     }
@@ -120,7 +132,7 @@ describe("mc-enroll", () => {
         "--print",
       ]);
       expect(r.code).toBe(1);
-      expect(r.stderr).toMatch(/redirects are not followed/u);
+      expect(r.stderr).toMatch(/answered with a redirect/u);
       expect(other.requests).toHaveLength(0);
     } finally {
       srv.close();
@@ -190,35 +202,140 @@ describe("mc-enroll", () => {
     }
   });
 
+  test("ignores an admin key from the environment exported for another URL", async () => {
+    const srv = await startMissionControl();
+    try {
+      const r = await run(
+        ["--url", srv.url, "--agent", "build-box", "--print"],
+        { MC_URL: "https://other.example.com" }
+      );
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(/ignoring MC_ADMIN_API_KEY/u);
+      expect(srv.requests).toHaveLength(0);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test.each([
+    [
+      "an issued key with a newline",
+      "mca_bad\nkey",
+      /issued key contains invalid characters/u,
+    ],
+    ["a numeric issued key", 12_345, /issued key is empty or not a string/u],
+  ])(
+    "refuses %s but logs its id for revocation",
+    async (_case, apiKey, message) => {
+      const srv = await startMissionControl({
+        handler: (req, res) => {
+          if (req.method !== "POST" || !req.url?.endsWith("/keys")) {
+            return false;
+          }
+          res.statusCode = 201;
+          res.end(JSON.stringify({ api_key: apiKey, key: { id: 3 } }));
+          return true;
+        },
+      });
+      try {
+        const r = await run([
+          "--url",
+          srv.url,
+          "--agent",
+          "build-box",
+          "--print",
+        ]);
+        expect(r.code).toBe(1);
+        expect(r.stderr).toMatch(message);
+        expect(r.stderr).toMatch(/\(id 3\)/u);
+        expect(r.stdout).toBe("");
+      } finally {
+        srv.close();
+      }
+    }
+  );
+
+  test("neutralises control and bidi characters in server errors", async () => {
+    const srv = await startMissionControl({
+      handler: (_req, res) => {
+        res.statusCode = 403;
+        res.end(JSON.stringify({ error: "a\u001B[31mb\u202Ec\u200Fd\u2028e" }));
+        return true;
+      },
+    });
+    try {
+      const r = await run([
+        "--url",
+        srv.url,
+        "--agent",
+        "build-box",
+        "--print",
+      ]);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("a?[31mb?c?d?e");
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("refuses a registration answer for another agent", async () => {
+    const srv = await startMissionControl({
+      handler: (req, res) => {
+        if (req.url !== "/api/agents/register") {
+          return false;
+        }
+        res.statusCode = 201;
+        res.end(
+          JSON.stringify({ agent: { id: "7/../../settings", name: "other" } })
+        );
+        return true;
+      },
+    });
+    try {
+      const r = await run([
+        "--url",
+        srv.url,
+        "--agent",
+        "build-box",
+        "--print",
+      ]);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(
+        /unexpected response from \/api\/agents\/register/u
+      );
+      expect(srv.requests.map((q) => q.method)).toEqual(["GET", "POST"]);
+    } finally {
+      srv.close();
+    }
+  });
+
   test.each([
     [["--agent", "x"], /--url is required/u],
-    [["--url", "ftp://mc.example.com", "--agent", "x"], /HTTP or HTTPS/u],
-    [["--url", "https://u:p@mc.example.com", "--agent", "x"], /credentials/u],
+    [["--url", "http://mc.invalid", "--agent", "x"], /--allow-http/u],
     [
-      ["--url", "https://mc.example.com", "--agent", "-bad"],
+      ["--url", "https://mc.invalid", "--agent", "x", "--key-name", "--print"],
+      /--key-name needs a value/u,
+    ],
+    [["--url", "ftp://mc.invalid", "--agent", "x"], /HTTP or HTTPS/u],
+    [["--url", "https://u:p@mc.invalid", "--agent", "x"], /credentials/u],
+    [
+      ["--url", "https://mc.invalid", "--agent", "-bad"],
       /--agent is required/u,
     ],
+    [["--url", "https://mc.invalid", "--agent", "123"], /--agent is required/u],
+    [["--url", "https://mc.invalid", "--agent", "1e3"], /--agent is required/u],
     [
-      ["--url", "https://mc.example.com", "--agent", "123"],
-      /--agent is required/u,
-    ],
-    [
-      [
-        "--url",
-        "https://mc.example.com",
-        "--agent",
-        "x",
-        "--expires-days",
-        "0",
-      ],
+      ["--url", "https://mc.invalid", "--agent", "x", "--expires-days", "0"],
       /--expires-days/u,
     ],
   ])(
     "rejects invalid arguments %j before any request",
     async (args, message) => {
+      // .invalid never resolves; a request would fail with a network error instead
       const r = await run(args);
       expect(r.code).toBe(1);
       expect(r.stderr).toMatch(message);
+      expect(r.stderr).not.toMatch(/ failed: /u);
     }
   );
 });

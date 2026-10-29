@@ -13,8 +13,10 @@
    --expires-days N     Key lifetime in days, 1-3650 (default: 90)
    --existing           Allow issuing a key for an agent that already exists
    --print              Print the agent key instead of configuring the local plugin
+   --allow-http         Allow a plain-HTTP URL to another machine (keys unencrypted)
 
- The admin key is read from MC_ADMIN_API_KEY or prompted for without echo.
+ The admin key is read from MC_ADMIN_API_KEY (only when MC_URL names the same URL
+ as --url) or prompted for without echo.
  It is never written anywhere. Without --print, the agent key is saved with
  `claude plugin configure mission-control@mission-control --values-stdin`.
 
@@ -25,6 +27,7 @@ import { hostname } from "node:os";
 
 import {
   fail,
+  failUnexpected,
   guardUnfinished,
   log,
   promptHidden,
@@ -35,6 +38,8 @@ import {
   AGENT_NAME_RULES,
   checkKey,
   enrollAgent,
+  envKey,
+  isRemotePlainHttp,
   isValidAgentName,
   normalizeUrl,
 } from "./lib/mission-control.ts";
@@ -49,12 +54,14 @@ interface Options {
   expiresDays: number;
   existing: boolean;
   print: boolean;
+  allowHttp: boolean;
 }
 
 const parseArgs = (argv: string[]): Options => {
   let url: string | undefined;
   let agent: string | undefined;
   const opts = {
+    allowHttp: false,
     existing: false,
     expiresDays: DEFAULT_EXPIRES_DAYS,
     keyName: hostname(),
@@ -64,7 +71,8 @@ const parseArgs = (argv: string[]): Options => {
     const arg = argv[i];
     const value = (): string => {
       const next = argv[i + 1];
-      if (next === undefined) {
+      // e.g. "--key-name --print" would otherwise swallow --print
+      if (next === undefined || next.startsWith("--")) {
         return fail(`${arg} needs a value`);
       }
       i += 1;
@@ -95,10 +103,14 @@ const parseArgs = (argv: string[]): Options => {
         opts.print = true;
         break;
       }
+      case "--allow-http": {
+        opts.allowHttp = true;
+        break;
+      }
       case "-h":
       case "--help": {
         process.stdout.write(
-          "Usage: node mc-enroll.cjs --url URL --agent NAME [--key-name NAME] [--expires-days N] [--existing] [--print]\n"
+          "Usage: node mc-enroll.cjs --url URL --agent NAME [--key-name NAME] [--expires-days N] [--existing] [--print] [--allow-http]\n"
         );
         process.exit(0);
         break;
@@ -121,17 +133,23 @@ const parseArgs = (argv: string[]): Options => {
   ) {
     fail(`--expires-days must be an integer between 1 and ${MAX_EXPIRES_DAYS}`);
   }
-  return { ...opts, agent, url: normalizeUrl(url) };
+  const normalized = normalizeUrl(url);
+  if (isRemotePlainHttp(normalized) && !opts.allowHttp) {
+    fail(
+      "plain HTTP would send API keys unencrypted; use HTTPS or pass --allow-http"
+    );
+  }
+  return { ...opts, agent, url: normalized };
 };
 
 const main = async () => {
   setProgram("mc-enroll");
   const opts = parseArgs(process.argv.slice(2));
   const adminKey = checkKey(
-    process.env.MC_ADMIN_API_KEY?.trim() ||
+    envKey("MC_ADMIN_API_KEY", opts.url) ??
       (await promptHidden(
         "Mission Control admin API key: ",
-        "MC_ADMIN_API_KEY"
+        "MC_ADMIN_API_KEY and MC_URL"
       )),
     "admin API key"
   );
@@ -168,6 +186,4 @@ const main = async () => {
 };
 
 const finished = guardUnfinished();
-main()
-  .then(finished)
-  .catch(() => fail("unexpected error"));
+main().then(finished).catch(failUnexpected);

@@ -16,6 +16,12 @@ export const fail = (message: string): never => {
   process.exit(1);
 };
 
+// For errors nobody expected: the message can contain secrets, the name can't.
+export const failUnexpected = (error: unknown): never =>
+  fail(
+    `unexpected error: ${error instanceof Error ? error.name : typeof error}`
+  );
+
 // Characters typed or pasted after a line ending, kept for the next prompt.
 let pending: string[] = [];
 
@@ -95,7 +101,8 @@ const readLine = async (
   const consume = (chars: string[]): boolean => {
     for (let i = 0; i < chars.length; i += 1) {
       if (applyChar(stdin, state, chars[i] ?? "", echo)) {
-        pending = chars.slice(i + 1);
+        // the rest of a pasted secret must not reach the next, echoed prompt
+        pending = echo ? chars.slice(i + 1) : [];
         return true;
       }
     }
@@ -170,10 +177,23 @@ export const createPrompter = async (): Promise<Prompter> => {
       await read(`${question}${fallback ? ` [${fallback}]` : ""}: `),
       fallback
     );
+  // strict, so piped answers that are out of step fail instead of counting as yes
   const confirm = async (question: string, fallback: boolean) => {
     const raw = await read(`${question} ${fallback ? "[Y/n]" : "[y/N]"} `);
     const answer = raw.trim().toLowerCase();
-    return answer ? answer.startsWith("y") : fallback;
+    if (!answer) {
+      return fallback;
+    }
+    if (
+      answer !== "y" &&
+      answer !== "yes" &&
+      answer !== "n" &&
+      answer !== "no"
+    ) {
+      // not echoed: an out-of-step piped line could be anything, e.g. a key
+      return fail("answer y or n");
+    }
+    return answer.startsWith("y");
   };
   return { ask, confirm };
 };

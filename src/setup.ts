@@ -3,10 +3,11 @@
  Interactive setup: installs the mission-control plugin into Claude Code and/or
  GitHub Copilot CLI and gives it an agent-scoped Mission Control API key.
 
- Usage: npx mission-control-claude-plugin
+ Usage: npx @tvaliasek/mission-control-claude-plugin
 
  Keys are read without echo, or from MC_API_KEY (an existing agent key) or
- MC_ADMIN_API_KEY (used once to issue an agent key, never stored).
+ MC_ADMIN_API_KEY (used once to issue an agent key, never stored). A key from the
+ environment is used only when MC_URL names the same Mission Control URL.
 
  Source: src/setup.ts in github.com/tvaliasek/mission-control-claude-plugin
 */
@@ -16,6 +17,7 @@ import { hostname } from "node:os";
 import {
   createPrompter,
   fail,
+  failUnexpected,
   guardUnfinished,
   log,
   promptHidden,
@@ -33,6 +35,8 @@ import {
   AGENT_NAME_RULES,
   checkKey,
   enrollAgent,
+  envKey,
+  isRemotePlainHttp,
   isValidAgentName,
   normalizeUrl,
   verifyKey,
@@ -89,18 +93,18 @@ const obtainKey = async (
   );
   if (!issueNew) {
     const agentKey = checkKey(
-      process.env.MC_API_KEY?.trim() ||
-        (await promptHidden("Agent API key: ", "MC_API_KEY")),
+      envKey("MC_API_KEY", url) ??
+        (await promptHidden("Agent API key: ", "MC_API_KEY and MC_URL")),
       "agent API key"
     );
     await verifyKey(url, agentKey, agent);
     return agentKey;
   }
   const adminKey = checkKey(
-    process.env.MC_ADMIN_API_KEY?.trim() ||
+    envKey("MC_ADMIN_API_KEY", url) ??
       (await promptHidden(
         "Mission Control admin API key (used once, not stored): ",
-        "MC_ADMIN_API_KEY"
+        "MC_ADMIN_API_KEY and MC_URL"
       )),
     "admin API key"
   );
@@ -142,8 +146,20 @@ const main = async () => {
   );
   const clients = await chooseClients(prompt);
   const url = normalizeUrl(
-    await prompt.ask("Mission Control URL (e.g. https://mc.example.com)")
+    await prompt.ask(
+      "Mission Control URL (e.g. https://mc.example.com)",
+      process.env.MC_URL?.trim()
+    )
   );
+  if (
+    isRemotePlainHttp(url) &&
+    !(await prompt.confirm(
+      "This URL uses plain HTTP: API keys would cross the network unencrypted. Continue anyway?",
+      false
+    ))
+  ) {
+    fail("use an HTTPS URL");
+  }
   const agent = await prompt.ask(
     "Agent name, unique per machine",
     defaultAgentName()
@@ -185,6 +201,4 @@ const main = async () => {
 };
 
 const finished = guardUnfinished();
-main()
-  .then(finished)
-  .catch(() => fail("unexpected error"));
+main().then(finished).catch(failUnexpected);

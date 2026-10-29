@@ -1,7 +1,7 @@
 {
   "name": "mission-control",
   "displayName": "Mission Control",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Connects Claude Code or GitHub Copilot CLI to a self-hosted Mission Control instance (builderz-labs/mission-control) through its MCP server",
   "author": {
     "name": "Tomáš Valiašek",
@@ -20,7 +20,7 @@
     "mc_api_key": {
       "type": "string",
       "title": "Mission Control API key",
-      "description": "Value of API_KEY from the Mission Control server environment",
+      "description": "Agent-scoped key (mca_...) issued for this agent by the setup (npx @tvaliasek/mission-control-claude-plugin) or mc-enroll. Not the server's API_KEY: that is the admin key and would give this agent admin rights",
       "required": true,
       "sensitive": true
     },

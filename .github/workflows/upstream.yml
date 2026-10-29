@@ -1,65 +1,46 @@
 name: Upstream release
 
-# Re-vendors the Mission Control MCP server when upstream publishes a release
-# and opens a pull request with the rebuilt plugin.
+# Fails (GitHub emails the failure) when Mission Control has a release newer than
+# the vendored one, or moved the vendored tag to another commit. Runs no upstream
+# code and has no write access; vendor by hand in a pull request instead:
+# npm run vendor -- vX.Y.Z
 on:
   schedule:
     - cron: "17 6 * * *"
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Upstream tag to vendor, e.g. v2.4.0 (default: latest release)"
-        required: false
 
 permissions:
-  contents: write
-  pull-requests: write
-
-concurrency:
-  group: upstream-release
-  cancel-in-progress: false
+  contents: read
 
 jobs:
-  vendor:
+  check:
     runs-on: ubuntu-latest
     steps:
-      # no stored credentials while dependency code runs; only the last step gets a write token
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
-      - id: vendor
+      - name: Compare with the vendored release
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag }}
-        run: node scripts/vendor-upstream.ts "${TAG:---latest}"
-      - if: steps.vendor.outputs.changed == 'true'
-        run: npm run check
-      - name: Push branch and open pull request
-        if: steps.vendor.outputs.changed == 'true'
-        env:
-          # PRs opened with the default token do not trigger CI; set UPSTREAM_PR_TOKEN
-          # (fine-grained PAT: contents + pull requests) to have CI run on them.
-          GH_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN || github.token }}
-          TAG: ${{ steps.vendor.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          branch="upstream/${TAG}"
-          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          if ! git ls-remote --exit-code --heads "$remote" "$branch" >/dev/null; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git switch -c "$branch"
-            git add -A plugins/ upstream.json
-            git commit -m "Vendor Mission Control ${TAG} MCP server"
-            git push "$remote" "$branch"
+          repo=$(jq -r .repo upstream.json)
+          tag=$(jq -r .tag upstream.json)
+          commit=$(jq -r .commit upstream.json)
+          now=$(gh api "repos/${repo}/commits/${tag}" --jq .sha)
+          # answers come from upstream: check them before they reach a log line
+          [[ $now =~ ^[0-9a-f]{40}$ ]] || { echo "::error::unexpected commit from the GitHub API"; exit 1; }
+          if [ "$now" != "$commit" ]; then
+            echo "::error::upstream moved ${tag} from ${commit} to ${now}. Check upstream before taking it: set that commit in upstream.json, run npm run vendor and bump the plugin version (see README)"
+            exit 1
           fi
-          # a rerun after a failed `gh pr create` finds the branch and still opens the PR
-          if [ "$(gh pr list --head "$branch" --state all --json number --jq length)" = "0" ]; then
-            gh pr create --base master --head "$branch" \
-              --title "Vendor Mission Control ${TAG}" \
-              --body "Re-vendors scripts/mc-mcp-server.cjs and mc-base-url.cjs from builderz-labs/mission-control ${TAG}, re-applies the loadConfig patch and bumps the plugin version. Review the upstream diff for new tools or changed endpoints before merging."
+          latest=$(gh api "repos/${repo}/releases/latest" --jq .tag_name)
+          [[ $latest =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            echo "::error::unexpected latest release tag from the GitHub API"
+            exit 1
+          }
+          newest=$(printf '%s\n%s\n' "$tag" "$latest" | sort -V | tail -n 1)
+          if [ "$newest" != "$tag" ]; then
+            echo "::error::Mission Control ${latest} is out (vendored: ${tag}). Review it and vendor it in a pull request: npm run vendor -- ${latest}"
+            exit 1
           fi
+          echo "vendored ${tag} is current"

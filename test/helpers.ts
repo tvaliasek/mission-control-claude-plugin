@@ -218,9 +218,13 @@ export interface RunResult {
 export const runScript = async (
   script: string,
   args: string[],
-  { env = {}, input }: { env?: Record<string, string>; input?: string } = {}
+  {
+    env = {},
+    input,
+    nodeArgs = [],
+  }: { env?: Record<string, string>; input?: string; nodeArgs?: string[] } = {}
 ): Promise<RunResult> => {
-  const child = spawn(process.execPath, [script, ...args], {
+  const child = spawn(process.execPath, [...nodeArgs, script, ...args], {
     env: { ...process.env, ...env },
     stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
   });

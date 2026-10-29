@@ -4,6 +4,8 @@ import { log } from "./cli.ts";
 
 export const MARKETPLACE_REPO = "tvaliasek/mission-control-claude-plugin";
 export const PLUGIN_ID = "mission-control@mission-control";
+// marketplace add clones a git repository, so allow for a slow network
+const CLIENT_TIMEOUT_MS = 300_000;
 
 interface RunResult {
   ok: boolean;
@@ -21,6 +23,7 @@ const run = (command: string, args: string[], input?: string): RunResult => {
     env,
     input,
     stdio: ["pipe", "pipe", "pipe"],
+    timeout: CLIENT_TIMEOUT_MS,
   });
   if (result.error) {
     const { code } = result.error as NodeJS.ErrnoException;

@@ -2,16 +2,20 @@
  Vendors the Mission Control MCP server into the plugin and re-applies our patch.
 
  Usage:
-   node scripts/vendor-upstream.ts            re-vendor the tag in upstream.json
-   node scripts/vendor-upstream.ts v2.4.0     vendor that tag
-   node scripts/vendor-upstream.ts --latest   vendor the latest upstream release
+   node scripts/vendor-upstream.ts            re-vendor the tag and commit in upstream.json
+   node scripts/vendor-upstream.ts v2.4.0     vendor that (newer) tag
+   node scripts/vendor-upstream.ts --latest   vendor the latest upstream release, if newer
+
+ Refused: an older tag than the vendored one, and the vendored tag once upstream moved
+ it to another commit. To take either on purpose, edit tag and commit in upstream.json,
+ run the script without arguments and bump the plugin version by hand.
 
  Files are fetched at the tag's commit SHA. When the tag changes, upstream.json is
  updated and the plugin's patch version is bumped, so installed plugins update.
  Set GITHUB_TOKEN to avoid the GitHub API's anonymous rate limit.
 */
 
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 const ROOT = path.join(import.meta.dirname, "..");
@@ -22,7 +26,9 @@ const PLUGIN_JSON = path.join(
 );
 const SCRIPTS_DIR = path.join(ROOT, "plugins/mission-control/scripts");
 const SHA_RE = /^[0-9a-f]{40}$/u;
-const TAG_RE = /^v\d+\.\d+\.\d+$/u;
+const REPO_RE = /^[\w-]+\/(?!\.{1,2}$)[\w.-]+$/u;
+// no leading zeros: v02.3.0 must not pass as a release other than v2.3.0
+const TAG_RE = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const VERSION_FIELD_RE =
   /"version": "(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)"/u;
 
@@ -100,6 +106,15 @@ const bumpPatchVersion = (manifest: string): string => {
   return manifest.replace(VERSION_FIELD_RE, `"version": "${next}"`);
 };
 
+const versionOf = (tag: string) => tag.slice(1).split(".").map(Number);
+
+// true when tag a is an older release than tag b (both match TAG_RE)
+const isOlder = (a: string, b: string) => {
+  const [x, y] = [versionOf(a), versionOf(b)];
+  const i = x.findIndex((n, k) => n !== y[k]);
+  return i !== -1 && (x[i] ?? 0) < (y[i] ?? 0);
+};
+
 const resolveTag = async (arg: string | undefined, current: Upstream) => {
   if (arg === "--latest") {
     const release = (await github(
@@ -110,17 +125,60 @@ const resolveTag = async (arg: string | undefined, current: Upstream) => {
   return arg ?? current.tag;
 };
 
-const main = async () => {
-  const current = JSON.parse(readFileSync(UPSTREAM_JSON, "utf-8")) as Upstream;
-  const tag = await resolveTag(process.argv[2], current);
-  if (!TAG_RE.test(tag)) {
-    throw new Error(`unexpected tag "${tag}"`);
-  }
+const commitOf = async (repo: string, tag: string): Promise<string> => {
   const { sha } = (await github(
-    `/repos/${current.repo}/commits/${encodeURIComponent(tag)}`
+    `/repos/${repo}/commits/${encodeURIComponent(tag)}`
   )) as { sha: string };
   if (!SHA_RE.test(sha)) {
     throw new Error(`unexpected commit SHA for ${tag}`);
+  }
+  return sha;
+};
+
+const readPinned = (): Upstream => {
+  const current = JSON.parse(readFileSync(UPSTREAM_JSON, "utf-8")) as Upstream;
+  if (
+    !(
+      REPO_RE.test(current.repo) &&
+      TAG_RE.test(current.tag) &&
+      SHA_RE.test(current.commit)
+    )
+  ) {
+    throw new Error(`unexpected repo, tag or commit in ${UPSTREAM_JSON}`);
+  }
+  return current;
+};
+
+const main = async () => {
+  const args = process.argv.slice(2);
+  if (args.length > 1) {
+    throw new Error("usage: vendor-upstream.ts [<tag> | --latest]");
+  }
+  const [arg] = args;
+  const current = readPinned();
+  const tag = await resolveTag(arg, current);
+  if (!TAG_RE.test(tag)) {
+    throw new Error(`unexpected tag "${tag}"`);
+  }
+  // never downgrade: the latest release can go back (newest one deleted, an older one
+  // marked latest), and a mistyped tag must not ship an older server
+  if (isOlder(tag, current.tag)) {
+    if (arg !== "--latest") {
+      throw new Error(
+        `${tag} is older than the vendored ${current.tag}; to roll back, edit upstream.json by hand`
+      );
+    }
+    process.stdout.write(
+      `latest release ${tag} is older than the vendored ${current.tag}; unchanged\n`
+    );
+    return;
+  }
+  const sha = await commitOf(current.repo, tag);
+  // a released tag now pointing elsewhere is a possible upstream compromise
+  if (tag === current.tag && sha !== current.commit) {
+    throw new Error(
+      `${tag} resolves to ${sha} upstream, but upstream.json has ${current.commit}. If upstream moved the tag, check it before taking it; to take it, set that commit in upstream.json, run npm run vendor and bump the plugin version (see README)`
+    );
   }
 
   // compute every output before writing any, so a failure leaves no mixed state
@@ -152,12 +210,6 @@ const main = async () => {
   process.stdout.write(
     `${changed ? "updated to" : "unchanged at"} ${current.repo}@${tag} (${sha})\n`
   );
-  if (process.env.GITHUB_OUTPUT) {
-    appendFileSync(
-      process.env.GITHUB_OUTPUT,
-      `changed=${changed}\ntag=${tag}\n`
-    );
-  }
 };
 
 await main();
