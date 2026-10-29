@@ -1,7 +1,6 @@
 import { fail, log } from "./cli.ts";
 
 const NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$/u;
-const DIGITS_RE = /^\d+$/u;
 // Printable ASCII only: anything else is rejected by fetch with an error that echoes the value
 const KEY_RE = /^[!-~]+$/u;
 const TRAILING_SLASHES_RE = /\/+$/u;
@@ -11,20 +10,23 @@ const HTTP_NOT_FOUND = 404;
 const HTTP_UNAUTHORIZED = 401;
 const HTTP_FORBIDDEN = 403;
 const DAY_MS = 86_400_000;
-// C0/C1 control characters, e.g. ESC: server text must not drive the terminal
-// oxlint-disable-next-line no-control-regex
-const CONTROL_CHARS_RE = /[\u0000-\u001F\u007F-\u009F]/gu;
+// C0/C1 control characters (e.g. ESC) and bidi overrides: server text must not drive
+// the terminal or reorder what it shows
+const CONTROL_CHARS_RE =
+  // oxlint-disable-next-line no-control-regex
+  /[\u0000-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/gu;
 
 // Text from the server, made safe to print.
 const printable = (value: unknown) =>
   String(value).replaceAll(CONTROL_CHARS_RE, "?");
 
-// all-digit names are rejected because Mission Control resolves them as agent ids
+// names that read as a number (e.g. 42, 1e3) are rejected because Mission Control
+// resolves them as agent ids
 export const isValidAgentName = (name: string) =>
-  NAME_RE.test(name) && !DIGITS_RE.test(name);
+  NAME_RE.test(name) && Number.isNaN(Number(name));
 
 export const AGENT_NAME_RULES =
-  "1-63 letters, digits, dots, hyphens or underscores, starting with a letter or digit, not only digits";
+  "1-63 letters, digits, dots, hyphens or underscores, starting with a letter or digit, not a number";
 
 export const checkKey = (key: string, what: string): string => {
   if (!key) {
@@ -54,6 +56,34 @@ export const normalizeUrl = (value: string): string => {
     fail("Mission Control URL must not contain a query string or fragment");
   }
   return parsed.toString().replace(TRAILING_SLASHES_RE, "");
+};
+
+const sameUrl = (a: string, b: string) => {
+  try {
+    const href = (value: string) =>
+      new URL(value).href.replace(TRAILING_SLASHES_RE, "");
+    return href(a) === href(b);
+  } catch {
+    return false;
+  }
+};
+
+// A key from the environment goes only to the URL exported with it (MC_URL), so a
+// key for one instance is never sent to another.
+export const envKey = (
+  name: "MC_API_KEY" | "MC_ADMIN_API_KEY",
+  url: string
+): string | undefined => {
+  const key = process.env[name]?.trim();
+  if (!key) {
+    return;
+  }
+  if (!sameUrl(process.env.MC_URL?.trim() ?? "", url)) {
+    log(`ignoring ${name} from the environment: MC_URL is not ${url}`);
+    return;
+  }
+  log(`using ${name} from the environment`);
+  return key;
 };
 
 // Plain HTTP to another machine sends API keys unencrypted.
@@ -94,12 +124,15 @@ const api = async (
     });
   } catch (error) {
     // fetch error messages can contain header values, so report only the cause code
-    const err = (error ?? {}) as { name?: string; cause?: { code?: string } };
-    const code = err.cause?.code;
-    // a refused redirect has no cause code
-    return fail(
-      `${method} ${route} failed: ${code ?? `${err.name ?? "network error"} (redirects are not followed)`}`
-    );
+    const err = (error ?? {}) as {
+      name?: string;
+      cause?: { code?: string; message?: string };
+    };
+    const reason =
+      err.cause?.message === "unexpected redirect"
+        ? "the server answered with a redirect, which is not followed so the key goes only to this URL"
+        : (err.cause?.code ?? err.name ?? "network error");
+    return fail(`${method} ${route} failed: ${reason}`);
   }
   const text = await res.text();
   let data: Record<string, unknown> = {};
@@ -204,6 +237,8 @@ export const enrollAgent = async (opts: EnrollOptions): Promise<string> => {
   if (!issued.api_key) {
     return fail("unexpected response from the key endpoint");
   }
+  // it is printed into shell export lines and saved as a header value
+  checkKey(issued.api_key, "issued key");
   const expires = new Date(Date.now() + opts.expiresDays * DAY_MS);
   log(
     `issued key ${printable(issued.key?.key_prefix ?? "")}… (id ${printable(issued.key?.id ?? "?")}), expires on ${expires.toISOString().slice(0, 10)}; issue a new one before then`

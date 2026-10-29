@@ -155,7 +155,7 @@ const main = async () => {
   if (process.env.GITHUB_OUTPUT) {
     appendFileSync(
       process.env.GITHUB_OUTPUT,
-      `changed=${changed}\ntag=${tag}\n`
+      `changed=${changed}\ntag=${tag}\ncommit=${sha}\n`
     );
   }
 };

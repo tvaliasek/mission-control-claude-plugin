@@ -15,7 +15,8 @@
    --print              Print the agent key instead of configuring the local plugin
    --allow-http         Allow a plain-HTTP URL to another machine (keys unencrypted)
 
- The admin key is read from MC_ADMIN_API_KEY or prompted for without echo.
+ The admin key is read from MC_ADMIN_API_KEY (only when MC_URL names the same URL
+ as --url) or prompted for without echo.
  It is never written anywhere. Without --print, the agent key is saved with
  `claude plugin configure mission-control@mission-control --values-stdin`.
 
@@ -37,6 +38,7 @@ import {
   AGENT_NAME_RULES,
   checkKey,
   enrollAgent,
+  envKey,
   isRemotePlainHttp,
   isValidAgentName,
   normalizeUrl,
@@ -143,15 +145,11 @@ const parseArgs = (argv: string[]): Options => {
 const main = async () => {
   setProgram("mc-enroll");
   const opts = parseArgs(process.argv.slice(2));
-  const fromEnv = process.env.MC_ADMIN_API_KEY?.trim();
-  if (fromEnv) {
-    log(`using MC_ADMIN_API_KEY from the environment for ${opts.url}`);
-  }
   const adminKey = checkKey(
-    fromEnv ||
+    envKey("MC_ADMIN_API_KEY", opts.url) ??
       (await promptHidden(
         "Mission Control admin API key: ",
-        "MC_ADMIN_API_KEY"
+        "MC_ADMIN_API_KEY and MC_URL"
       )),
     "admin API key"
   );

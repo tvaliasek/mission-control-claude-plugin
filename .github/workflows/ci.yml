@@ -19,18 +19,24 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      # installed plugins update only when this version changes
+      # installed plugins update only when this version increases
       - name: Plugin version is bumped when the plugin changes
         if: github.event_name == 'pull_request'
-        env:
-          BASE: ${{ github.event.pull_request.base.sha }}
         run: |
-          git fetch --no-tags --depth=1 origin "$BASE"
-          if ! git diff --quiet "$BASE" HEAD -- plugins/; then
+          # the checkout is the merge commit; its first parent is the base it merges into
+          git fetch --no-tags --depth=2 origin "$GITHUB_SHA"
+          if ! git diff --quiet HEAD^1 HEAD -- plugins/; then
             manifest=plugins/mission-control/.claude-plugin/plugin.json
-            old=$(git show "$BASE:$manifest" | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')
-            new=$(node -p "require('./$manifest').version")
-            test "$old" != "$new" || { echo "::error::plugins/ changed; bump version in $manifest"; exit 1; }
+            git show "HEAD^1:$manifest" > "$RUNNER_TEMP/base-plugin.json"
+            node -e '
+              const v = (f) => require(f).version.split(".").map(Number);
+              const [a, b] = [v(process.argv[1]), v(process.argv[2])];
+              const i = a.findIndex((n, k) => n !== b[k]);
+              if (b.some(Number.isNaN) || i === -1 || b[i] < a[i]) {
+                console.log(`::error::plugins/ changed; increase version in plugins/mission-control/.claude-plugin/plugin.json (now ${b.join(".")})`);
+                process.exit(1);
+              }
+            ' "$RUNNER_TEMP/base-plugin.json" "$PWD/$manifest"
           fi
       - run: npm ci
       - run: npm run typecheck

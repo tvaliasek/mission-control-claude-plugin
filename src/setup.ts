@@ -35,6 +35,7 @@ import {
   AGENT_NAME_RULES,
   checkKey,
   enrollAgent,
+  envKey,
   isRemotePlainHttp,
   isValidAgentName,
   normalizeUrl,
@@ -57,33 +58,6 @@ const defaultAgentName = () => {
 
 // Single-quoted for POSIX shells; a ' inside the value becomes '\''.
 const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
-
-const TRAILING_SLASHES_RE = /\/+$/u;
-
-const sameUrl = (a: string, b: string) => {
-  try {
-    const href = (value: string) =>
-      new URL(value).href.replace(TRAILING_SLASHES_RE, "");
-    return href(a) === href(b);
-  } catch {
-    return false;
-  }
-};
-
-// A key from the environment goes only to the URL exported with it (MC_URL), so a
-// key for one instance is never sent to another one typed here.
-const envKey = (name: "MC_API_KEY" | "MC_ADMIN_API_KEY", url: string) => {
-  const key = process.env[name]?.trim();
-  if (!key) {
-    return;
-  }
-  if (!sameUrl(process.env.MC_URL?.trim() ?? "", url)) {
-    log(`ignoring ${name} from the environment: MC_URL is not ${url}`);
-    return;
-  }
-  log(`using ${name} from the environment`);
-  return key;
-};
 
 interface Clients {
   claude: boolean;

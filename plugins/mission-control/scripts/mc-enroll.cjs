@@ -147,10 +147,17 @@ const createPrompter = async ()=>{
         };
     }
     const ask = async (question, fallback)=>withDefault(await read(`${question}${fallback ? ` [${fallback}]` : ""}: `), fallback);
+    // strict, so piped answers that are out of step fail instead of counting as yes
     const confirm = async (question, fallback)=>{
         const raw = await read(`${question} ${fallback ? "[Y/n]" : "[y/N]"} `);
         const answer = raw.trim().toLowerCase();
-        return answer ? answer.startsWith("y") : fallback;
+        if (!answer) {
+            return fallback;
+        }
+        if (answer !== "y" && answer !== "yes" && answer !== "n" && answer !== "no") {
+            return cli_fail(`answer y or n, not "${answer}"`);
+        }
+        return answer.startsWith("y");
     };
     return {
         ask,
@@ -268,7 +275,6 @@ const installCopilot = ()=>{
 ;// CONCATENATED MODULE: ./src/lib/mission-control.ts
 
 const NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$/u;
-const DIGITS_RE = /^\d+$/u;
 // Printable ASCII only: anything else is rejected by fetch with an error that echoes the value
 const KEY_RE = /^[!-~]+$/u;
 const TRAILING_SLASHES_RE = /\/+$/u;
@@ -282,14 +288,16 @@ const HTTP_NOT_FOUND = 404;
 const HTTP_UNAUTHORIZED = 401;
 const HTTP_FORBIDDEN = 403;
 const DAY_MS = 86400000;
-// C0/C1 control characters, e.g. ESC: server text must not drive the terminal
-// oxlint-disable-next-line no-control-regex
-const CONTROL_CHARS_RE = /[\u0000-\u001F\u007F-\u009F]/gu;
+// C0/C1 control characters (e.g. ESC) and bidi overrides: server text must not drive
+// the terminal or reorder what it shows
+const CONTROL_CHARS_RE = // oxlint-disable-next-line no-control-regex
+/[\u0000-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/gu;
 // Text from the server, made safe to print.
 const printable = (value)=>String(value).replaceAll(CONTROL_CHARS_RE, "?");
-// all-digit names are rejected because Mission Control resolves them as agent ids
-const isValidAgentName = (name)=>NAME_RE.test(name) && !DIGITS_RE.test(name);
-const AGENT_NAME_RULES = "1-63 letters, digits, dots, hyphens or underscores, starting with a letter or digit, not only digits";
+// names that read as a number (e.g. 42, 1e3) are rejected because Mission Control
+// resolves them as agent ids
+const isValidAgentName = (name)=>NAME_RE.test(name) && Number.isNaN(Number(name));
+const AGENT_NAME_RULES = "1-63 letters, digits, dots, hyphens or underscores, starting with a letter or digit, not a number";
 const checkKey = (key, what)=>{
     if (!key) {
         cli_fail(`${what} is empty`);
@@ -318,6 +326,28 @@ const normalizeUrl = (value)=>{
     }
     return parsed.toString().replace(TRAILING_SLASHES_RE, "");
 };
+const sameUrl = (a, b)=>{
+    try {
+        const href = (value)=>new URL(value).href.replace(TRAILING_SLASHES_RE, "");
+        return href(a) === href(b);
+    } catch  {
+        return false;
+    }
+};
+// A key from the environment goes only to the URL exported with it (MC_URL), so a
+// key for one instance is never sent to another.
+const envKey = (name, url)=>{
+    const key = process.env[name]?.trim();
+    if (!key) {
+        return;
+    }
+    if (!sameUrl(process.env.MC_URL?.trim() ?? "", url)) {
+        cli_log(`ignoring ${name} from the environment: MC_URL is not ${url}`);
+        return;
+    }
+    cli_log(`using ${name} from the environment`);
+    return key;
+};
 // Plain HTTP to another machine sends API keys unencrypted.
 const isRemotePlainHttp = (url)=>{
     const parsed = new URL(url);
@@ -345,9 +375,8 @@ const api = async (baseUrl, apiKey, method, route, body, agentName)=>{
     } catch (error) {
         // fetch error messages can contain header values, so report only the cause code
         const err = error ?? {};
-        const code = err.cause?.code;
-        // a refused redirect has no cause code
-        return cli_fail(`${method} ${route} failed: ${code ?? `${err.name ?? "network error"} (redirects are not followed)`}`);
+        const reason = err.cause?.message === "unexpected redirect" ? "the server answered with a redirect, which is not followed so the key goes only to this URL" : err.cause?.code ?? err.name ?? "network error";
+        return cli_fail(`${method} ${route} failed: ${reason}`);
     }
     const text = await res.text();
     let data = {};
@@ -411,6 +440,8 @@ const enrollAgent = async (opts)=>{
     if (!issued.api_key) {
         return cli_fail("unexpected response from the key endpoint");
     }
+    // it is printed into shell export lines and saved as a header value
+    checkKey(issued.api_key, "issued key");
     const expires = new Date(Date.now() + opts.expiresDays * DAY_MS);
     cli_log(`issued key ${printable(issued.key?.key_prefix ?? "")}… (id ${printable(issued.key?.id ?? "?")}), expires on ${expires.toISOString().slice(0, 10)}; issue a new one before then`);
     return issued.api_key;
@@ -455,7 +486,8 @@ const verifyKey = async (url, key, agent)=>{
    --print              Print the agent key instead of configuring the local plugin
    --allow-http         Allow a plain-HTTP URL to another machine (keys unencrypted)
 
- The admin key is read from MC_ADMIN_API_KEY or prompted for without echo.
+ The admin key is read from MC_ADMIN_API_KEY (only when MC_URL names the same URL
+ as --url) or prompted for without echo.
  It is never written anywhere. Without --print, the agent key is saved with
  `claude plugin configure mission-control@mission-control --values-stdin`.
 
@@ -558,11 +590,7 @@ const parseArgs = (argv)=>{
 const main = async ()=>{
     setProgram("mc-enroll");
     const opts = parseArgs(process.argv.slice(2));
-    const fromEnv = process.env.MC_ADMIN_API_KEY?.trim();
-    if (fromEnv) {
-        cli_log(`using MC_ADMIN_API_KEY from the environment for ${opts.url}`);
-    }
-    const adminKey = checkKey(fromEnv || await promptHidden("Mission Control admin API key: ", "MC_ADMIN_API_KEY"), "admin API key");
+    const adminKey = checkKey(envKey("MC_ADMIN_API_KEY", opts.url) ?? await promptHidden("Mission Control admin API key: ", "MC_ADMIN_API_KEY and MC_URL"), "admin API key");
     const agentKey = await enrollAgent({
         adminKey,
         agent: opts.agent,

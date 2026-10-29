@@ -156,6 +156,20 @@ describe("mc-mcp-launch", () => {
     }
   });
 
+  test("ignores whitespace around the configured key", async () => {
+    const mc = await startMissionControl();
+    try {
+      const r = await callTool(
+        { ...CLAUDE_CODE_ENV, MC_API_KEY: " mca_configured\n", MC_URL: mc.url },
+        "mc_list_agents"
+      );
+      expect(r.stdout, r.stderr).toContain('"id":2');
+      expect(mc.seen).toEqual([{ key: "mca_configured", url: "/api/agents" }]);
+    } finally {
+      mc.close();
+    }
+  });
+
   test("does not send the key to a redirect target", async () => {
     const target = await startMissionControl();
     const mc = await startMissionControl(target.url);
@@ -165,6 +179,7 @@ describe("mc-mcp-launch", () => {
         "mc_list_agents"
       );
       expect(r.stdout, r.stderr).toContain('"id":2');
+      expect(r.stdout).toMatch(/answered with a redirect/u);
       expect(mc.seen).toHaveLength(1);
       expect(target.seen).toEqual([]);
     } finally {

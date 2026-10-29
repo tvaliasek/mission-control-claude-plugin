@@ -20,8 +20,15 @@ const SCRIPT = builtScript(
 
 afterAll(removeTempDirs);
 
+// MC_URL names the --url instance, which an admin key from the environment requires.
 const run = (args: string[], env: Record<string, string> = {}) =>
-  runScript(SCRIPT, args, { env: { MC_ADMIN_API_KEY: ADMIN_KEY, ...env } });
+  runScript(SCRIPT, args, {
+    env: {
+      MC_ADMIN_API_KEY: ADMIN_KEY,
+      MC_URL: args[args.indexOf("--url") + 1] ?? "",
+      ...env,
+    },
+  });
 
 describe("mc-enroll", () => {
   test("--print registers the agent and prints only the agent key", async () => {
@@ -125,7 +132,7 @@ describe("mc-enroll", () => {
         "--print",
       ]);
       expect(r.code).toBe(1);
-      expect(r.stderr).toMatch(/redirects are not followed/u);
+      expect(r.stderr).toMatch(/answered with a redirect/u);
       expect(other.requests).toHaveLength(0);
     } finally {
       srv.close();
@@ -195,6 +202,21 @@ describe("mc-enroll", () => {
     }
   });
 
+  test("ignores an admin key from the environment exported for another URL", async () => {
+    const srv = await startMissionControl();
+    try {
+      const r = await run(
+        ["--url", srv.url, "--agent", "build-box", "--print"],
+        { MC_URL: "https://other.example.com" }
+      );
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(/ignoring MC_ADMIN_API_KEY/u);
+      expect(srv.requests).toHaveLength(0);
+    } finally {
+      srv.close();
+    }
+  });
+
   test("refuses a registration answer for another agent", async () => {
     const srv = await startMissionControl({
       handler: (req, res) => {
@@ -240,6 +262,7 @@ describe("mc-enroll", () => {
       /--agent is required/u,
     ],
     [["--url", "https://mc.invalid", "--agent", "123"], /--agent is required/u],
+    [["--url", "https://mc.invalid", "--agent", "1e3"], /--agent is required/u],
     [
       ["--url", "https://mc.invalid", "--agent", "x", "--expires-days", "0"],
       /--expires-days/u,

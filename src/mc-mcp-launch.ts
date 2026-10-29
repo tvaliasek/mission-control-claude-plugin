@@ -20,7 +20,8 @@ const resolved = (value: string | undefined): string | undefined =>
 // never sent to a URL from the plugin configuration or the other way round.
 const pick = (url: string | undefined, apiKey: string | undefined) => {
   const u = resolved(url);
-  const k = resolved(apiKey);
+  // fetch and Mission Control both ignore surrounding whitespace in the header
+  const k = resolved(apiKey)?.trim();
   return u && k ? { apiKey: k, url: u } : undefined;
 };
 
@@ -41,8 +42,20 @@ delete process.env.MC_COOKIE;
 // The vendored server follows redirects, and fetch then sends x-api-key to the
 // redirect target. Refuse every redirect instead of patching the vendored file.
 const { fetch: originalFetch } = globalThis;
-globalThis.fetch = (input, init) =>
-  originalFetch(input, { ...init, redirect: "error" });
+globalThis.fetch = async (input, init) => {
+  try {
+    return await originalFetch(input, { ...init, redirect: "error" });
+  } catch (error) {
+    const { cause } = error as { cause?: { message?: string } };
+    if (cause?.message === "unexpected redirect") {
+      throw new Error(
+        "Mission Control answered with a redirect, which is refused so the API key is not forwarded; set the Mission Control URL to the address it redirects to",
+        { cause: error }
+      );
+    }
+    throw error;
+  }
+};
 
 if (settings && !KEY_RE.test(settings.apiKey)) {
   process.stderr.write(

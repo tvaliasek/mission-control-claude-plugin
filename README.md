@@ -33,6 +33,10 @@ Then:
 
 Keys can also come from `MC_ADMIN_API_KEY` or `MC_API_KEY` in the environment instead of being typed, but only together with `MC_URL` set to the same URL; otherwise the setup ignores them and asks, so a key exported for one instance is never sent to another. A plain-HTTP URL to another machine needs an explicit confirmation. Releases after 0.1.0 are published from this repository by GitHub Actions with an [npm provenance](https://docs.npmjs.com/generating-provenance-statements) attestation; 0.1.0 itself is published manually and has none. Check signatures and provenance with `npm audit signatures` in a project that depends on the package, and pin a version (`npx @tvaliasek/mission-control-claude-plugin@<version>`) rather than running whatever is latest.
 
+### Upgrading from plugin 0.1.0
+
+Plugin 0.1.0 asked for "the value of API_KEY from the Mission Control server environment", which is the admin key. If you entered it, the agent has admin rights. Run the setup again (or `mc-enroll`) to issue an agent key, enter that key with `/plugin configure mission-control@mission-control`, and rotate the server's `API_KEY` if it was given to agent machines. Since 0.2.0 the plugin also refuses HTTP redirects (set the URL to the final address) and API keys with characters other than printable ASCII.
+
 ## Manual install in Claude Code
 
 ```bash

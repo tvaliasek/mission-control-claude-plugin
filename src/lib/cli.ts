@@ -177,10 +177,22 @@ export const createPrompter = async (): Promise<Prompter> => {
       await read(`${question}${fallback ? ` [${fallback}]` : ""}: `),
       fallback
     );
+  // strict, so piped answers that are out of step fail instead of counting as yes
   const confirm = async (question: string, fallback: boolean) => {
     const raw = await read(`${question} ${fallback ? "[Y/n]" : "[y/N]"} `);
     const answer = raw.trim().toLowerCase();
-    return answer ? answer.startsWith("y") : fallback;
+    if (!answer) {
+      return fallback;
+    }
+    if (
+      answer !== "y" &&
+      answer !== "yes" &&
+      answer !== "n" &&
+      answer !== "no"
+    ) {
+      return fail(`answer y or n, not "${answer}"`);
+    }
+    return answer.startsWith("y");
   };
   return { ask, confirm };
 };
