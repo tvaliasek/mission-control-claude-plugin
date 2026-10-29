@@ -217,6 +217,67 @@ describe("mc-enroll", () => {
     }
   });
 
+  test.each([
+    [
+      "an issued key with a newline",
+      "mca_bad\nkey",
+      /issued key contains invalid characters/u,
+    ],
+    ["a numeric issued key", 12_345, /issued key is empty or not a string/u],
+  ])(
+    "refuses %s but logs its id for revocation",
+    async (_case, apiKey, message) => {
+      const srv = await startMissionControl({
+        handler: (req, res) => {
+          if (req.method !== "POST" || !req.url?.endsWith("/keys")) {
+            return false;
+          }
+          res.statusCode = 201;
+          res.end(JSON.stringify({ api_key: apiKey, key: { id: 3 } }));
+          return true;
+        },
+      });
+      try {
+        const r = await run([
+          "--url",
+          srv.url,
+          "--agent",
+          "build-box",
+          "--print",
+        ]);
+        expect(r.code).toBe(1);
+        expect(r.stderr).toMatch(message);
+        expect(r.stderr).toMatch(/\(id 3\)/u);
+        expect(r.stdout).toBe("");
+      } finally {
+        srv.close();
+      }
+    }
+  );
+
+  test("neutralises control and bidi characters in server errors", async () => {
+    const srv = await startMissionControl({
+      handler: (_req, res) => {
+        res.statusCode = 403;
+        res.end(JSON.stringify({ error: "a\u001B[31mb\u202Ec\u200Fd\u2028e" }));
+        return true;
+      },
+    });
+    try {
+      const r = await run([
+        "--url",
+        srv.url,
+        "--agent",
+        "build-box",
+        "--print",
+      ]);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("a?[31mb?c?d?e");
+    } finally {
+      srv.close();
+    }
+  });
+
   test("refuses a registration answer for another agent", async () => {
     const srv = await startMissionControl({
       handler: (req, res) => {

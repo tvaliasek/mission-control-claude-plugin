@@ -190,7 +190,8 @@ export const createPrompter = async (): Promise<Prompter> => {
       answer !== "n" &&
       answer !== "no"
     ) {
-      return fail(`answer y or n, not "${answer}"`);
+      // not echoed: an out-of-step piped line could be anything, e.g. a key
+      return fail("answer y or n");
     }
     return answer.startsWith("y");
   };

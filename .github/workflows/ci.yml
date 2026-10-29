@@ -18,21 +18,29 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-          cache: npm
-      # installed plugins update only when this version increases
+          # no dependency cache: the upstream workflow runs upstream code on master
+          # and could write cache entries that this job would restore
+          package-manager-cache: false
+      # installed plugins update only when this version increases. Also checked on
+      # push, so two pull requests bumping to the same version can't both slip through.
       - name: Plugin version is bumped when the plugin changes
-        if: github.event_name == 'pull_request'
+        env:
+          # pull request: the merge commit's first parent; push: the previous master
+          BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: |
-          # the checkout is the merge commit; its first parent is the base it merges into
-          git fetch --no-tags --depth=2 origin "$GITHUB_SHA"
-          if ! git diff --quiet HEAD^1 HEAD -- plugins/; then
+          if [ -n "$BEFORE" ]; then base="$BEFORE"; else base=HEAD^1; fi
+          case "$base" in 0000000000000000000000000000000000000000) exit 0 ;; esac
+          git fetch --no-tags --depth=2 origin "$GITHUB_SHA" ${BEFORE:+"$BEFORE"}
+          if ! git diff --quiet "$base" HEAD -- plugins/; then
             manifest=plugins/mission-control/.claude-plugin/plugin.json
-            git show "HEAD^1:$manifest" > "$RUNNER_TEMP/base-plugin.json"
+            git show "$base:$manifest" > "$RUNNER_TEMP/base-plugin.json"
             node -e '
-              const v = (f) => require(f).version.split(".").map(Number);
+              const SEMVER_RE = /^\d+\.\d+\.\d+$/;
+              const raw = (f) => require(f).version;
+              const v = (f) => raw(f).split(".").map(Number);
               const [a, b] = [v(process.argv[1]), v(process.argv[2])];
               const i = a.findIndex((n, k) => n !== b[k]);
-              if (b.some(Number.isNaN) || i === -1 || b[i] < a[i]) {
+              if (!SEMVER_RE.test(raw(process.argv[2])) || i === -1 || b[i] < a[i]) {
                 console.log(`::error::plugins/ changed; increase version in plugins/mission-control/.claude-plugin/plugin.json (now ${b.join(".")})`);
                 process.exit(1);
               }

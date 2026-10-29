@@ -10,11 +10,11 @@ const HTTP_NOT_FOUND = 404;
 const HTTP_UNAUTHORIZED = 401;
 const HTTP_FORBIDDEN = 403;
 const DAY_MS = 86_400_000;
-// C0/C1 control characters (e.g. ESC) and bidi overrides: server text must not drive
-// the terminal or reorder what it shows
+// C0/C1 control characters (e.g. ESC), bidi controls, zero-width characters and line
+// separators: server text must not drive the terminal or change what it shows
 const CONTROL_CHARS_RE =
   // oxlint-disable-next-line no-control-regex
-  /[\u0000-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/gu;
+  /[\u0000-\u001F\u007F-\u009F\u061C\u200B-\u200F\u2028-\u202E\u2066-\u2069\uFEFF]/gu;
 
 // Text from the server, made safe to print.
 const printable = (value: unknown) =>
@@ -28,9 +28,9 @@ export const isValidAgentName = (name: string) =>
 export const AGENT_NAME_RULES =
   "1-63 letters, digits, dots, hyphens or underscores, starting with a letter or digit, not a number";
 
-export const checkKey = (key: string, what: string): string => {
-  if (!key) {
-    fail(`${what} is empty`);
+export const checkKey = (key: unknown, what: string): string => {
+  if (typeof key !== "string" || !key) {
+    return fail(`${what} is empty or not a string`);
   }
   if (!KEY_RE.test(key)) {
     fail(`${what} contains invalid characters`);
@@ -237,12 +237,13 @@ export const enrollAgent = async (opts: EnrollOptions): Promise<string> => {
   if (!issued.api_key) {
     return fail("unexpected response from the key endpoint");
   }
-  // it is printed into shell export lines and saved as a header value
-  checkKey(issued.api_key, "issued key");
   const expires = new Date(Date.now() + opts.expiresDays * DAY_MS);
+  // logged first, so a key refused below can still be found and revoked by its id
   log(
     `issued key ${printable(issued.key?.key_prefix ?? "")}… (id ${printable(issued.key?.id ?? "?")}), expires on ${expires.toISOString().slice(0, 10)}; issue a new one before then`
   );
+  // it is printed into shell export lines and saved as a header value
+  checkKey(issued.api_key, "issued key");
   return issued.api_key;
 };
 

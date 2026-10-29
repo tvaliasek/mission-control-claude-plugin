@@ -278,6 +278,18 @@ describe("setup", () => {
     expect(callsOf(bins.calls())).toEqual(["claude --version"]);
   });
 
+  test("fails on an answer that is not yes or no, without echoing it", async () => {
+    const bins = fakeBins(["claude"]);
+    const r = await runScript(SETUP, [], {
+      env: { PATH: bins.dir },
+      input: answers("mca_secret_pasted_here"),
+    });
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/answer y or n/u);
+    expect(r.stderr).not.toContain("mca_secret");
+    expect(callsOf(bins.calls())).toEqual(["claude --version"]);
+  });
+
   test("fails when neither client is installed", async () => {
     const bins = fakeBins([]);
     const r = await runScript(SETUP, [], {

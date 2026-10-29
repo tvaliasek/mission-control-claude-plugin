@@ -79,10 +79,14 @@ jobs:
           # (fine-grained PAT: contents + pull requests) to have CI run on them.
           GH_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN || github.token }}
           TAG: ${{ needs.vendor.outputs.tag }}
+          COMMIT: ${{ needs.vendor.outputs.commit }}
         run: |
           branch="upstream/${TAG}"
           remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          if ! git ls-remote --exit-code --heads "$remote" "$branch" >/dev/null; then
+          if git fetch --no-tags --depth=1 "$remote" "$branch" 2>/dev/null; then
+            # a branch left by an earlier run must hold the commit this run tested
+            test "$(git show FETCH_HEAD:upstream.json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).commit')" = "$COMMIT"
+          else
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git switch -c "$branch"
@@ -91,7 +95,8 @@ jobs:
             git push "$remote" "$branch"
           fi
           # a rerun after a failed `gh pr create` finds the branch and still opens the PR
-          if [ "$(gh pr list --head "$branch" --state all --json number --jq length)" = "0" ]; then
+          # only this repository's PRs count: anyone can open a fork PR from a branch with this name
+          if [ "$(gh pr list --head "$branch" --state all --json isCrossRepository --jq '[.[] | select(.isCrossRepository | not)] | length')" = "0" ]; then
             gh pr create --base master --head "$branch" \
               --title "Vendor Mission Control ${TAG}" \
               --body "Re-vendors scripts/mc-mcp-server.cjs and mc-base-url.cjs from builderz-labs/mission-control ${TAG}, re-applies the loadConfig patch and bumps the plugin version. Review the upstream diff for new tools or changed endpoints before merging."

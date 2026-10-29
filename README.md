@@ -79,7 +79,7 @@ How it works: `.mcp.json` passes both the Claude Code values (`${user_config.*}`
 
 ## Choosing an API key
 
-The server's global `API_KEY` authenticates as **admin**: an agent holding it can manage users, backups and every other agent. Give each machine an agent-scoped key instead. The [quick setup](#quick-setup) does this for you. To keep the admin key off the agent machine, use `scripts/mc-enroll.cjs` (Node 18+, no dependencies) instead. It uses the admin key once to register the agent and issue it a key with the `operator` scope; the admin key is read from `MC_ADMIN_API_KEY` or a hidden prompt and never stored.
+The server's global `API_KEY` authenticates as **admin**: an agent holding it can manage users, backups and every other agent. Give each machine an agent-scoped key instead. The [quick setup](#quick-setup) does this for you. To keep the admin key off the agent machine, use `scripts/mc-enroll.cjs` (Node 18+, no dependencies) instead. It uses the admin key once to register the agent and issue it a key with the `operator` scope; the admin key is read from a hidden prompt, or from `MC_ADMIN_API_KEY` when `MC_URL` is set to the same URL as `--url`, and never stored.
 
 **Recommended: enroll from a trusted workstation**, so the admin key never touches the agent machine:
 
