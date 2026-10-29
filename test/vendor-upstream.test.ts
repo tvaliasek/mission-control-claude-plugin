@@ -89,7 +89,7 @@ describe("vendor-upstream", () => {
       const r = await ws.run(args, { LATEST: "v2.3.0", MOVED: "1" });
       expect(r.code).toBe(1);
       expect(r.stderr).toMatch(
-        /upstream moved v2\.3\.0 from a{40} to b{40}.*by hand/u
+        /v2\.3\.0 resolves to b{40} upstream, but upstream\.json has a{40}.*run npm run vendor and bump/u
       );
       expect(ws.pinned().commit).toBe(VENDORED);
     }

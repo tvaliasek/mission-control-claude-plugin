@@ -30,7 +30,7 @@ jobs:
           # answers come from upstream: check them before they reach a log line
           [[ $now =~ ^[0-9a-f]{40}$ ]] || { echo "::error::unexpected commit from the GitHub API"; exit 1; }
           if [ "$now" != "$commit" ]; then
-            echo "::error::upstream moved ${tag} from ${commit} to ${now}. Check upstream before taking it (set that commit in upstream.json by hand)"
+            echo "::error::upstream moved ${tag} from ${commit} to ${now}. Check upstream before taking it: set that commit in upstream.json, run npm run vendor and bump the plugin version (see README)"
             exit 1
           fi
           latest=$(gh api "repos/${repo}/releases/latest" --jq .tag_name)
