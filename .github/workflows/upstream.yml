@@ -23,7 +23,8 @@ jobs:
   # code (the tests start the vendored server), so nothing from this job except its
   # outputs reaches the job that holds a write token.
   vendor:
-    # from master only: another ref's workflow and tree would end up in a PR to master
+    # guards against dispatching from another branch by mistake, whose tree would end up
+    # in a PR to master; not a boundary (another ref's copy of this file can drop it)
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     outputs:
@@ -84,10 +85,19 @@ jobs:
         run: |
           branch="upstream/${TAG}"
           # this repository's PRs from that branch only (filtered by owner on the server,
-          # so fork PRs with the same branch name don't count). Closing the PR rejects
-          # the tag: no new PR is opened for it, the next upstream release gets one.
-          count=$(gh api "repos/${GITHUB_REPOSITORY}/pulls?head=${GITHUB_REPOSITORY_OWNER}:${branch}&state=all" --jq length)
-          if [ "$count" != "0" ]; then
+          # so fork PRs with the same branch name don't count): "<all> <closed unmerged>"
+          counts=$(gh api "repos/${GITHUB_REPOSITORY}/pulls?head=${GITHUB_REPOSITORY_OWNER}:${branch}&state=all" \
+            --jq '"\(length) \(map(select(.state == "closed" and .merged_at == null)) | length)"')
+          read -r total rejected <<<"$counts"
+          case "${total}:${rejected}" in
+            *[!0-9:]* | :* | *:) echo "::error::unexpected answer listing pull requests: ${counts}"; exit 1 ;;
+          esac
+          if [ "$rejected" != "0" ]; then
+            # closing the PR rejects the tag; its branch is left alone, so reopening undoes it
+            echo "::warning::the pull request from ${branch} was closed, so ${TAG} is not vendored; reopen it to take ${TAG} after all"
+            exit 0
+          fi
+          if [ "$total" != "0" ]; then
             echo "::notice::a pull request from ${branch} already exists"
             exit 0
           fi
