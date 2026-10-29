@@ -82,23 +82,29 @@ jobs:
           # (fine-grained PAT: contents + pull requests) to have CI run on them.
           GH_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN || github.token }}
           TAG: ${{ needs.vendor.outputs.tag }}
+          COMMIT: ${{ needs.vendor.outputs.commit }}
         run: |
           branch="upstream/${TAG}"
           # this repository's PRs from that branch only (filtered by owner on the server,
-          # so fork PRs with the same branch name don't count): "<all> <closed unmerged>"
+          # so fork PRs with the same branch name don't count): "<open> <closed unmerged> <merged>"
           counts=$(gh api "repos/${GITHUB_REPOSITORY}/pulls?head=${GITHUB_REPOSITORY_OWNER}:${branch}&state=all" \
-            --jq '"\(length) \(map(select(.state == "closed" and .merged_at == null)) | length)"')
-          read -r total rejected <<<"$counts"
-          case "${total}:${rejected}" in
-            *[!0-9:]* | :* | *:) echo "::error::unexpected answer listing pull requests: ${counts}"; exit 1 ;;
+            --jq '"\(map(select(.state == "open")) | length) \(map(select(.state == "closed" and .merged_at == null)) | length) \(map(select(.merged_at != null)) | length)"')
+          read -r open rejected merged <<<"$counts"
+          case "${open}:${rejected}:${merged}" in
+            *[!0-9:]* | :* | *: | *::*) echo "::error::unexpected answer listing pull requests: ${counts}"; exit 1 ;;
           esac
-          if [ "$rejected" != "0" ]; then
-            # closing the PR rejects the tag; its branch is left alone, so reopening undoes it
-            echo "::warning::the pull request from ${branch} was closed, so ${TAG} is not vendored; reopen it to take ${TAG} after all"
+          if [ "$open" != "0" ]; then
+            echo "::notice::a pull request from ${branch} is open"
             exit 0
           fi
-          if [ "$total" != "0" ]; then
-            echo "::notice::a pull request from ${branch} already exists"
+          if [ "$rejected" != "0" ]; then
+            # closing the PR rejects the tag; its branch is left alone, so reopening undoes it
+            echo "::warning::the pull request from ${branch} was closed, so ${TAG} is not vendored; reopen it (restore its branch first if it was deleted) to take ${TAG} after all"
+            exit 0
+          fi
+          if [ "$merged" != "0" ]; then
+            # merged, yet this run saw a change: upstream moved the tag to another commit
+            echo "::warning::${TAG} was vendored before, but the tag now points to ${COMMIT}; vendor it again by hand if that is wanted"
             exit 0
           fi
           # upstream/* branches belong to this workflow: replace whatever an earlier,
