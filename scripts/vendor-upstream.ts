@@ -7,8 +7,9 @@
    node scripts/vendor-upstream.ts --latest   vendor the latest upstream release,
                                               unless it is older than the vendored one
    node scripts/vendor-upstream.ts v2.3.0 --accept-moved
-                                              take a vendored tag that upstream moved
-                                              to another commit (refused otherwise)
+                                              vendor that tag even though the vendored
+                                              tag moved or vanished upstream (refused
+                                              otherwise): take the moved tag, or roll back
 
  Files are fetched at the tag's commit SHA. When the tag changes, upstream.json is
  updated and the plugin's patch version is bumped, so installed plugins update.
@@ -26,6 +27,7 @@ const PLUGIN_JSON = path.join(
 );
 const SCRIPTS_DIR = path.join(ROOT, "plugins/mission-control/scripts");
 const SHA_RE = /^[0-9a-f]{40}$/u;
+const REPO_RE = /^[\w-]+\/[\w.-]+$/u;
 // no leading zeros: v02.3.0 must not pass as a release other than v2.3.0
 const TAG_RE = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const VERSION_FIELD_RE =
@@ -160,23 +162,42 @@ const parseArgs = (args: string[]) => {
 
 const readPinned = (): Upstream => {
   const current = JSON.parse(readFileSync(UPSTREAM_JSON, "utf-8")) as Upstream;
-  if (!(TAG_RE.test(current.tag) && SHA_RE.test(current.commit))) {
-    throw new Error(`unexpected tag or commit in ${UPSTREAM_JSON}`);
+  if (
+    !(
+      REPO_RE.test(current.repo) &&
+      TAG_RE.test(current.tag) &&
+      SHA_RE.test(current.commit)
+    )
+  ) {
+    throw new Error(`unexpected repo, tag or commit in ${UPSTREAM_JSON}`);
   }
   return current;
 };
 
-// A vendored tag that upstream moved to another commit is a possible upstream
-// compromise: refuse to go on until someone checks and takes it on purpose. Returns
-// the vendored tag's current commit.
-const checkVendoredTag = async (
-  current: Upstream,
-  acceptMoved: boolean
-): Promise<string> => {
-  const sha = await commitOf(current.repo, current.tag);
-  if (sha !== current.commit && !acceptMoved) {
+const NOT_FOUND_RE = /HTTP (?:404|422)$/u;
+
+// A vendored tag that upstream moved to another commit, or removed, is a possible
+// upstream compromise: refuse to go on until someone checks and takes a tag on
+// purpose with --accept-moved. Returns the vendored tag's current commit.
+const checkVendoredTag = async (current: Upstream): Promise<string> => {
+  const way =
+    `check upstream, then take it with: npm run vendor -- ${current.tag} --accept-moved` +
+    ", or roll back with: npm run vendor -- <older tag> --accept-moved";
+  let sha: string;
+  try {
+    sha = await commitOf(current.repo, current.tag);
+  } catch (error) {
+    if (error instanceof Error && NOT_FOUND_RE.test(error.message)) {
+      throw new Error(
+        `the vendored ${current.tag} no longer exists upstream; ${way}`,
+        { cause: error }
+      );
+    }
+    throw error;
+  }
+  if (sha !== current.commit) {
     throw new Error(
-      `upstream moved ${current.tag} from ${current.commit} to ${sha}. Check upstream before taking it: npm run vendor -- ${current.tag} --accept-moved`
+      `upstream moved ${current.tag} from ${current.commit} to ${sha}; ${way}`
     );
   }
   return sha;
@@ -189,10 +210,12 @@ const main = async () => {
   if (!TAG_RE.test(tag)) {
     throw new Error(`unexpected tag "${tag}"`);
   }
-  // a newer release replaces the vendored tag, so only then is the check skipped
-  const vendoredSha = isOlder(current.tag, tag)
-    ? undefined
-    : await checkVendoredTag(current, acceptMoved && tag === current.tag);
+  // skipped for a newer release, which replaces the vendored tag, and for a tag a
+  // person took explicitly with --accept-moved (the moved one, or a rollback)
+  const vendoredSha =
+    isOlder(current.tag, tag) || acceptMoved
+      ? undefined
+      : await checkVendoredTag(current);
   // the latest release can go back (newest one deleted, an older one marked latest):
   // keep what is vendored instead of opening a downgrade
   if (arg === "--latest" && isOlder(tag, current.tag)) {
