@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { describe, expect, test } from "@rstest/core";
@@ -33,10 +35,18 @@ const COPILOT_ENV = {
   MC_URL_FALLBACK: "",
 };
 
-const startMissionControl = async () => {
+const startMissionControl = async (redirectTo?: string) => {
   const seen: { url: string; key: string | undefined }[] = [];
+  const cookies: (string | undefined)[] = [];
   const server = createServer((req, res) => {
     seen.push({ key: req.headers["x-api-key"] as string, url: req.url ?? "" });
+    cookies.push(req.headers.cookie);
+    if (redirectTo) {
+      res.statusCode = 307;
+      res.setHeader("Location", `${redirectTo}${req.url ?? ""}`);
+      res.end();
+      return;
+    }
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ agents: [] }));
   });
@@ -45,6 +55,7 @@ const startMissionControl = async () => {
   const { port } = server.address() as AddressInfo;
   return {
     close: () => server.close(),
+    cookies,
     seen,
     url: `http://127.0.0.1:${port}`,
   };
@@ -143,6 +154,66 @@ describe("mc-mcp-launch", () => {
       configured.close();
       shell.close();
     }
+  });
+
+  test("does not send the key to a redirect target", async () => {
+    const target = await startMissionControl();
+    const mc = await startMissionControl(target.url);
+    try {
+      const r = await callTool(
+        { ...CLAUDE_CODE_ENV, MC_URL: mc.url },
+        "mc_list_agents"
+      );
+      expect(r.stdout, r.stderr).toContain('"id":2');
+      expect(mc.seen).toHaveLength(1);
+      expect(target.seen).toEqual([]);
+    } finally {
+      mc.close();
+      target.close();
+    }
+  });
+
+  test("sends neither MC_COOKIE nor a saved mc-cli session cookie", async () => {
+    const mc = await startMissionControl();
+    // a profile as `mc-cli login` saves it; its cookie would override the agent key
+    const home = mkdtempSync(path.join(tmpdir(), "mc-home-"));
+    const profiles = path.join(home, ".mission-control", "profiles");
+    mkdirSync(profiles, { recursive: true });
+    writeFileSync(
+      path.join(profiles, "default.json"),
+      JSON.stringify({ cookie: "mc-session=profile", url: mc.url })
+    );
+    try {
+      const r = await callTool(
+        {
+          ...CLAUDE_CODE_ENV,
+          HOME: home,
+          MC_COOKIE: "mc-session=shell",
+          MC_URL: mc.url,
+        },
+        "mc_list_agents"
+      );
+      expect(r.stdout, r.stderr).toContain('"id":2');
+      expect(mc.seen).toEqual([{ key: "mca_configured", url: "/api/agents" }]);
+      expect(mc.cookies).toEqual([undefined]);
+    } finally {
+      mc.close();
+      rmSync(home, { force: true, recursive: true });
+    }
+  });
+
+  test("refuses a key with invalid characters without echoing it", async () => {
+    const r = await callTool(
+      {
+        ...CLAUDE_CODE_ENV,
+        MC_API_KEY: "SECRETVALUE\nx",
+        MC_URL: "http://127.0.0.1:1",
+      },
+      "mc_list_agents"
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/invalid characters/u);
+    expect(`${r.stdout}${r.stderr}`).not.toContain("SECRETVALUE");
   });
 
   test("exits with instructions when neither source provides values", async () => {

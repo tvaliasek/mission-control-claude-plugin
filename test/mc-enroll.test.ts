@@ -79,6 +79,11 @@ describe("mc-enroll", () => {
       ]);
       expect(allowed.code, allowed.stderr).toBe(0);
       expect(allowed.stdout).toBe(`${ISSUED_KEY}\n`);
+      // registering again would reset the working agent's status
+      expect(srv.requests.slice(1).map((q) => `${q.method} ${q.url}`)).toEqual([
+        "GET /api/agents/build-box",
+        "POST /api/agents/7/keys",
+      ]);
     } finally {
       srv.close();
     }
@@ -190,35 +195,63 @@ describe("mc-enroll", () => {
     }
   });
 
+  test("refuses a registration answer for another agent", async () => {
+    const srv = await startMissionControl({
+      handler: (req, res) => {
+        if (req.url !== "/api/agents/register") {
+          return false;
+        }
+        res.statusCode = 201;
+        res.end(
+          JSON.stringify({ agent: { id: "7/../../settings", name: "other" } })
+        );
+        return true;
+      },
+    });
+    try {
+      const r = await run([
+        "--url",
+        srv.url,
+        "--agent",
+        "build-box",
+        "--print",
+      ]);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(
+        /unexpected response from \/api\/agents\/register/u
+      );
+      expect(srv.requests.map((q) => q.method)).toEqual(["GET", "POST"]);
+    } finally {
+      srv.close();
+    }
+  });
+
   test.each([
     [["--agent", "x"], /--url is required/u],
-    [["--url", "ftp://mc.example.com", "--agent", "x"], /HTTP or HTTPS/u],
-    [["--url", "https://u:p@mc.example.com", "--agent", "x"], /credentials/u],
+    [["--url", "http://mc.invalid", "--agent", "x"], /--allow-http/u],
     [
-      ["--url", "https://mc.example.com", "--agent", "-bad"],
+      ["--url", "https://mc.invalid", "--agent", "x", "--key-name", "--print"],
+      /--key-name needs a value/u,
+    ],
+    [["--url", "ftp://mc.invalid", "--agent", "x"], /HTTP or HTTPS/u],
+    [["--url", "https://u:p@mc.invalid", "--agent", "x"], /credentials/u],
+    [
+      ["--url", "https://mc.invalid", "--agent", "-bad"],
       /--agent is required/u,
     ],
+    [["--url", "https://mc.invalid", "--agent", "123"], /--agent is required/u],
     [
-      ["--url", "https://mc.example.com", "--agent", "123"],
-      /--agent is required/u,
-    ],
-    [
-      [
-        "--url",
-        "https://mc.example.com",
-        "--agent",
-        "x",
-        "--expires-days",
-        "0",
-      ],
+      ["--url", "https://mc.invalid", "--agent", "x", "--expires-days", "0"],
       /--expires-days/u,
     ],
   ])(
     "rejects invalid arguments %j before any request",
     async (args, message) => {
+      // .invalid never resolves; a request would fail with a network error instead
       const r = await run(args);
       expect(r.code).toBe(1);
       expect(r.stderr).toMatch(message);
+      expect(r.stderr).not.toMatch(/ failed: /u);
     }
   );
 });

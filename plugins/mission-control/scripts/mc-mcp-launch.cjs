@@ -56,9 +56,25 @@ const pick = (url, apiKey)=>{
     } : undefined;
 };
 const settings = pick(process.env.MC_URL, process.env.MC_API_KEY) ?? pick(process.env.MC_URL_FALLBACK, process.env.MC_API_KEY_FALLBACK);
+// Printable ASCII only: fetch rejects anything else with an error that contains the
+// key, and the server would return that error to the model as tool output.
+const KEY_RE = /^[!-~]+$/u;
 delete process.env.MC_URL_FALLBACK;
 delete process.env.MC_API_KEY_FALLBACK;
-if (settings) {
+// Mission Control checks a session cookie before the API key, so an MC_COOKIE left in
+// the shell by mc-cli would make the agent act as that logged-in user.
+delete process.env.MC_COOKIE;
+// The vendored server follows redirects, and fetch then sends x-api-key to the
+// redirect target. Refuse every redirect instead of patching the vendored file.
+const { fetch: originalFetch } = globalThis;
+globalThis.fetch = (input, init)=>originalFetch(input, {
+        ...init,
+        redirect: "error"
+    });
+if (settings && !KEY_RE.test(settings.apiKey)) {
+    process.stderr.write("mission-control: the Mission Control API key contains invalid characters; set it again\n");
+    process.exitCode = 1;
+} else if (settings) {
     process.env.MC_URL = settings.url;
     process.env.MC_API_KEY = settings.apiKey;
     // external in rslib.config.ts: loaded from the plugin's scripts directory at runtime.

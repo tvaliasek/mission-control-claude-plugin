@@ -29,7 +29,7 @@ describe("setup", () => {
     const bins = fakeBins(["claude"]);
     try {
       const r = await runScript(SETUP, [], {
-        env: { MC_ADMIN_API_KEY: ADMIN_KEY, PATH: bins.dir },
+        env: { MC_ADMIN_API_KEY: ADMIN_KEY, MC_URL: mc.url, PATH: bins.dir },
         input: answers("y", mc.url, "build-box", "y"),
       });
       expect(r.code, r.stderr).toBe(0);
@@ -63,7 +63,7 @@ describe("setup", () => {
     const bins = fakeBins(["copilot"]);
     try {
       const r = await runScript(SETUP, [], {
-        env: { MC_API_KEY: EXISTING_AGENT_KEY, PATH: bins.dir },
+        env: { MC_API_KEY: EXISTING_AGENT_KEY, MC_URL: mc.url, PATH: bins.dir },
         input: answers("y", mc.url, "build-box", "n"),
       });
       expect(r.code, r.stderr).toBe(0);
@@ -115,7 +115,7 @@ describe("setup", () => {
       const bins = fakeBins(["copilot"]);
       try {
         const r = await runScript(SETUP, [], {
-          env: { MC_API_KEY: key, PATH: bins.dir },
+          env: { MC_API_KEY: key, MC_URL: mc.url, PATH: bins.dir },
           input: answers("y", mc.url, agent, "n"),
         });
         expect(r.code).toBe(1);
@@ -138,7 +138,7 @@ describe("setup", () => {
     });
     try {
       const r = await runScript(SETUP, [], {
-        env: { MC_API_KEY: EXISTING_AGENT_KEY, PATH: bins.dir },
+        env: { MC_API_KEY: EXISTING_AGENT_KEY, MC_URL: mc.url, PATH: bins.dir },
         input: answers("y", mc.url, "build-box", "n"),
       });
       expect(r.code, r.stderr).toBe(0);
@@ -157,7 +157,7 @@ describe("setup", () => {
     });
     try {
       const r = await runScript(SETUP, [], {
-        env: { MC_ADMIN_API_KEY: ADMIN_KEY, PATH: bins.dir },
+        env: { MC_ADMIN_API_KEY: ADMIN_KEY, MC_URL: mc.url, PATH: bins.dir },
         input: answers("y", mc.url, "build-box", "y"),
       });
       expect(r.code).toBe(1);
@@ -173,7 +173,7 @@ describe("setup", () => {
     const bins = fakeBins(["claude"]);
     try {
       const r = await runScript(SETUP, [], {
-        env: { MC_ADMIN_API_KEY: ADMIN_KEY, PATH: bins.dir },
+        env: { MC_ADMIN_API_KEY: ADMIN_KEY, MC_URL: mc.url, PATH: bins.dir },
         input: answers("y", mc.url, "build-box", "y", "n"),
       });
       expect(r.code).toBe(1);
@@ -191,7 +191,7 @@ describe("setup", () => {
     });
     try {
       const r = await runScript(SETUP, [], {
-        env: { MC_ADMIN_API_KEY: ADMIN_KEY, PATH: bins.dir },
+        env: { MC_ADMIN_API_KEY: ADMIN_KEY, MC_URL: mc.url, PATH: bins.dir },
         input: answers("y", mc.url, "build-box", "y"),
       });
       expect(r.code).toBe(1);
@@ -208,7 +208,7 @@ describe("setup", () => {
     });
     try {
       const r = await runScript(SETUP, [], {
-        env: { MC_ADMIN_API_KEY: ADMIN_KEY, PATH: bins.dir },
+        env: { MC_ADMIN_API_KEY: ADMIN_KEY, MC_URL: mc.url, PATH: bins.dir },
         input: answers("y", "y", mc.url, "build-box", "y"),
       });
       expect(r.code).toBe(1);
@@ -217,6 +217,65 @@ describe("setup", () => {
     } finally {
       mc.close();
     }
+  });
+
+  test("ignores a key from the environment exported for another URL", async () => {
+    const mc = await startMissionControl({ existingAgents: ["build-box"] });
+    const bins = fakeBins(["copilot"]);
+    try {
+      const r = await runScript(SETUP, [], {
+        env: {
+          MC_API_KEY: EXISTING_AGENT_KEY,
+          MC_URL: "https://other.example.com",
+          PATH: bins.dir,
+        },
+        input: answers("y", mc.url, "build-box", "n"),
+      });
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(/ignoring MC_API_KEY/u);
+      expect(r.stderr).toMatch(/set MC_API_KEY and MC_URL instead/u);
+      expect(mc.requests).toHaveLength(0);
+    } finally {
+      mc.close();
+    }
+  });
+
+  test("refuses a pasted key when the admin check is inconclusive", async () => {
+    const mc = await startMissionControl({
+      existingAgents: ["build-box"],
+      // e.g. rate limiting: says nothing about whether the key is an admin key
+      handler: (req, res) => {
+        if (!req.url?.endsWith("/keys")) {
+          return false;
+        }
+        res.statusCode = 429;
+        res.end("{}");
+        return true;
+      },
+    });
+    const bins = fakeBins(["copilot"]);
+    try {
+      const r = await runScript(SETUP, [], {
+        env: { MC_API_KEY: ADMIN_KEY, MC_URL: mc.url, PATH: bins.dir },
+        input: answers("y", mc.url, "build-box", "n"),
+      });
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(/could not check .* HTTP 429/u);
+      expect(r.stdout).toBe("");
+    } finally {
+      mc.close();
+    }
+  });
+
+  test("stops at a plain-HTTP URL to another machine unless confirmed", async () => {
+    const bins = fakeBins(["claude"]);
+    const r = await runScript(SETUP, [], {
+      env: { PATH: bins.dir },
+      input: answers("y", "http://mc.invalid", ""),
+    });
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/use an HTTPS URL/u);
+    expect(callsOf(bins.calls())).toEqual(["claude --version"]);
   });
 
   test("fails when neither client is installed", async () => {
@@ -233,7 +292,7 @@ describe("setup", () => {
     const bins = fakeBins(["claude"]);
     const r = await runScript(SETUP, [], {
       env: { PATH: bins.dir },
-      input: answers("y", "https://mc.example.com", "-bad"),
+      input: answers("y", "https://mc.invalid", "-bad"),
     });
     expect(r.code).toBe(1);
     expect(r.stderr).toMatch(/agent name must be/u);

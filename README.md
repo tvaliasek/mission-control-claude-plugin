@@ -18,7 +18,7 @@ Not an official Builderz Labs project.
 ## Quick setup
 
 ```bash
-npx mission-control-claude-plugin
+npx @tvaliasek/mission-control-claude-plugin
 ```
 
 The setup asks which of the installed clients (Claude Code, GitHub Copilot CLI) to set up, then for the Mission Control URL and an agent name. It installs the plugin, then gets an agent key in one of two ways:
@@ -28,10 +28,10 @@ The setup asks which of the installed clients (Claude Code, GitHub Copilot CLI) 
 
 Then:
 
-- **Claude Code:** the URL, key and agent name are saved in the plugin configuration (key in secure storage). Start a new session.
+- **Claude Code:** the URL, key and agent name are saved in the plugin configuration. The key goes to Claude Code's secure storage, not `settings.json`: the keychain on macOS; on other systems this can be a file that only your user account can read, so any program running as you can read the key. Start a new session.
 - **Copilot CLI:** the `export` lines for `MC_URL`, `MC_API_KEY` and `MC_AGENT_NAME` are printed. The setup does not write them anywhere; put them where you keep secrets.
 
-Keys can also come from `MC_ADMIN_API_KEY` or `MC_API_KEY` in the environment instead of being typed. Releases after 0.1.0 are published from this repository by GitHub Actions with an [npm provenance](https://docs.npmjs.com/generating-provenance-statements) attestation; 0.1.0 itself is published manually and has none. Check signatures and provenance with `npm audit signatures` in a project that depends on the package, and pin a version (`npx mission-control-claude-plugin@<version>`) rather than running whatever is latest.
+Keys can also come from `MC_ADMIN_API_KEY` or `MC_API_KEY` in the environment instead of being typed, but only together with `MC_URL` set to the same URL; otherwise the setup ignores them and asks, so a key exported for one instance is never sent to another. A plain-HTTP URL to another machine needs an explicit confirmation. Releases after 0.1.0 are published from this repository by GitHub Actions with an [npm provenance](https://docs.npmjs.com/generating-provenance-statements) attestation; 0.1.0 itself is published manually and has none. Check signatures and provenance with `npm audit signatures` in a project that depends on the package, and pin a version (`npx @tvaliasek/mission-control-claude-plugin@<version>`) rather than running whatever is latest.
 
 ## Manual install in Claude Code
 
@@ -50,7 +50,7 @@ When the plugin is enabled, Claude Code asks for:
 | `mc_api_key` | API key. Stored in secure storage, not in `settings.json` |
 | `agent_name` | Unique agent name for this machine. Machines sharing a name share one agent and one task queue |
 
-To change them later, run `/plugin configure mission-control@mission-control` in Claude Code. For unattended setup, pass them at install time: `claude plugin install mission-control@mission-control --config mc_url=https://mc.example.com --config mc_api_key=... --config agent_name=build-box`.
+To change them later, run `/plugin configure mission-control@mission-control` in Claude Code. For unattended setup, install the plugin, then pipe the values as JSON to `claude plugin configure mission-control@mission-control --values-stdin`, for example from a file only you can read: `claude plugin configure mission-control@mission-control --values-stdin < mc-config.json` with `{"mc_url": "https://mc.example.com", "mc_api_key": "mca_...", "agent_name": "build-box"}`. Do not pass the key with `--config mc_api_key=...`: command-line arguments end up in shell history and are visible to other users in the process list.
 
 Check the connection by asking Claude to "connect to Mission Control", or run `/mcp` and confirm `mission-control` is connected.
 
@@ -69,7 +69,7 @@ export MC_API_KEY=mca_...          # an agent-scoped key, see below
 export MC_AGENT_NAME=build-box
 ```
 
-The key is then in your shell environment rather than an OS keychain. Keep it out of shared dotfiles and prefer an agent-scoped key. Without `MC_URL` and `MC_API_KEY`, the `mission-control` MCP server does not start; `copilot mcp list` and `/mcp` show its status.
+The key is then in your shell environment rather than an OS keychain. Every command the agent runs in that shell inherits it, so an agent that follows instructions from a task can read and send it. Keep it out of shared dotfiles, use only an agent-scoped key, and prefer setting the variables only for the `copilot` process (for example a wrapper script that reads them from your secret store and then runs `copilot`). Without `MC_URL` and `MC_API_KEY`, the `mission-control` MCP server does not start; `copilot mcp list` and `/mcp` show its status.
 
 How it works: `.mcp.json` passes both the Claude Code values (`${user_config.*}`) and the environment fallbacks (`${MC_URL:-}`, `${MC_API_KEY:-}`) to `scripts/mc-mcp-launch.cjs`. Copilot leaves `${user_config.*}` unexpanded, so the launcher uses the fallbacks, then starts the vendored server.
 
@@ -88,7 +88,7 @@ Download from a release tag, not `master`, and read the script before giving it 
 
 **Alternative: enroll on the agent machine** (Claude Code only). Install the plugin, then run the same script without `--print`. It saves URL, agent key and agent name with `claude plugin configure mission-control@mission-control --values-stdin`. The admin key is typed on that machine, so use this only where that is acceptable. If `claude` cannot be started (for example the npm `claude.cmd` shim on Windows), the script prints the key instead and exits 1; enter it with `/plugin configure`.
 
-Options: `--key-name` (label, default the hostname), `--expires-days` (default 90), `--existing` (issue another key for an agent that already exists; refused by default so you do not take over another machine's agent by accident). The script never follows HTTP redirects, so the admin key goes only to the URL you gave. To revoke a key, send `DELETE /api/agents/<agent-id>/keys` with body `{"key_id": <id>}` and the admin key; the script prints the key id when it issues one.
+Options: `--key-name` (label, default the hostname), `--expires-days` (default 90), `--existing` (issue another key for an agent that already exists; refused by default so you do not take over another machine's agent by accident). `--allow-http` permits a plain-HTTP URL to another machine, which the script otherwise refuses. The script never follows HTTP redirects, so the admin key goes only to the URL you gave; the plugin's MCP server refuses redirects too. To revoke a key, send `DELETE /api/agents/<agent-id>/keys` with body `{"key_id": <id>}` and the admin key; the script prints the key id when it issues one.
 
 What an `operator` agent key can do in Mission Control v2.3.0:
 
@@ -120,11 +120,11 @@ The tests run against the built files in `plugins/mission-control/scripts/` and 
 ### Releasing
 
 1. Bump `version` in `package.json`, commit, and push a matching tag: `git tag v0.2.0 && git push origin v0.2.0`.
-2. The **Release** workflow checks that the tagged commit is on `master` and matches the version, runs all checks in a job without publish credentials, then a separate job (GitHub environment `npm`) publishes the tested build `mission-control-claude-plugin` to npm through [trusted publishing](https://docs.npmjs.com/trusted-publishers), with provenance and no stored npm token.
+2. The **Release** workflow checks that the tagged commit is on `master` and matches the version, runs all checks in a job without publish credentials, then a separate job (GitHub environment `npm`) publishes the tested build `@tvaliasek/mission-control-claude-plugin` to npm through [trusted publishing](https://docs.npmjs.com/trusted-publishers), with provenance and no stored npm token.
 
 The trusted publisher is configured in the package's settings on npmjs.com, so the package must exist first: publish the first version manually (`npm run build && npm publish --access public`), then add a trusted publisher for this repository with the workflow file `release.yml` and the environment `npm`. The first publish through it must happen within 2 days. Adding required reviewers to the `npm` environment in the repository settings makes every release wait for approval.
 
-The plugin itself is versioned separately in `plugins/mission-control/.claude-plugin/plugin.json`; Claude Code and Copilot CLI read it from the default branch.
+The plugin itself is versioned separately in `plugins/mission-control/.claude-plugin/plugin.json`; Claude Code and Copilot CLI read it from the default branch and update installed plugins only when that version changes. Bump it in every pull request that changes `plugins/`; CI fails otherwise.
 
 ## Layout
 

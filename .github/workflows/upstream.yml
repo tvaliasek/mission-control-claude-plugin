@@ -12,18 +12,22 @@ on:
         required: false
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 concurrency:
   group: upstream-release
   cancel-in-progress: false
 
 jobs:
+  # Vendors and checks with a read-only token. `npm run check` runs the new upstream
+  # code (the tests start the vendored server), so this job must never hold a write
+  # token: code running here could plant a git hook or edit files for a later step.
   vendor:
     runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.vendor.outputs.changed }}
+      tag: ${{ steps.vendor.outputs.tag }}
     steps:
-      # no stored credentials while dependency code runs; only the last step gets a write token
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -37,15 +41,43 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
         run: node scripts/vendor-upstream.ts "${TAG:---latest}"
+      # uploaded before any upstream code runs, so the checks below can't alter it
+      - if: steps.vendor.outputs.changed == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: vendored
+          path: |
+            upstream.json
+            plugins/mission-control/.claude-plugin/plugin.json
+            plugins/mission-control/scripts/mc-mcp-server.cjs
+            plugins/mission-control/scripts/mc-base-url.cjs
+          if-no-files-found: error
       - if: steps.vendor.outputs.changed == 'true'
         run: npm run check
+
+  # Commits the checked files and opens the pull request. Runs no repository or
+  # dependency code, and git hooks are disabled.
+  pull-request:
+    needs: vendor
+    if: needs.vendor.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: vendored
+          path: .
       - name: Push branch and open pull request
-        if: steps.vendor.outputs.changed == 'true'
         env:
           # PRs opened with the default token do not trigger CI; set UPSTREAM_PR_TOKEN
           # (fine-grained PAT: contents + pull requests) to have CI run on them.
           GH_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN || github.token }}
-          TAG: ${{ steps.vendor.outputs.tag }}
+          TAG: ${{ needs.vendor.outputs.tag }}
         run: |
           branch="upstream/${TAG}"
           remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
@@ -53,9 +85,10 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git switch -c "$branch"
-            git add -A plugins/ upstream.json
-            git commit -m "Vendor Mission Control ${TAG} MCP server"
-            git push "$remote" "$branch"
+            git add upstream.json plugins/mission-control/.claude-plugin/plugin.json \
+              plugins/mission-control/scripts/mc-mcp-server.cjs plugins/mission-control/scripts/mc-base-url.cjs
+            git -c core.hooksPath=/dev/null commit -m "Vendor Mission Control ${TAG} MCP server"
+            git -c core.hooksPath=/dev/null push "$remote" "$branch"
           fi
           # a rerun after a failed `gh pr create` finds the branch and still opens the PR
           if [ "$(gh pr list --head "$branch" --state all --json number --jq length)" = "0" ]; then

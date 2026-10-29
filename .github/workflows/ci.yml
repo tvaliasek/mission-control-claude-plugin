@@ -19,6 +19,19 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      # installed plugins update only when this version changes
+      - name: Plugin version is bumped when the plugin changes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE"
+          if ! git diff --quiet "$BASE" HEAD -- plugins/; then
+            manifest=plugins/mission-control/.claude-plugin/plugin.json
+            old=$(git show "$BASE:$manifest" | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')
+            new=$(node -p "require('./$manifest').version")
+            test "$old" != "$new" || { echo "::error::plugins/ changed; bump version in $manifest"; exit 1; }
+          fi
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint

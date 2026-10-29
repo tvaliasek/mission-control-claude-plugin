@@ -1,5 +1,5 @@
 {
-  "name": "mission-control-claude-plugin",
+  "name": "@tvaliasek/mission-control-claude-plugin",
   "version": "0.1.0",
   "description": "Interactive setup that connects Claude Code or GitHub Copilot CLI to a self-hosted Mission Control instance",
   "keywords": [

@@ -16,6 +16,12 @@ export const fail = (message: string): never => {
   process.exit(1);
 };
 
+// For errors nobody expected: the message can contain secrets, the name can't.
+export const failUnexpected = (error: unknown): never =>
+  fail(
+    `unexpected error: ${error instanceof Error ? error.name : typeof error}`
+  );
+
 // Characters typed or pasted after a line ending, kept for the next prompt.
 let pending: string[] = [];
 
@@ -95,7 +101,8 @@ const readLine = async (
   const consume = (chars: string[]): boolean => {
     for (let i = 0; i < chars.length; i += 1) {
       if (applyChar(stdin, state, chars[i] ?? "", echo)) {
-        pending = chars.slice(i + 1);
+        // the rest of a pasted secret must not reach the next, echoed prompt
+        pending = echo ? chars.slice(i + 1) : [];
         return true;
       }
     }
