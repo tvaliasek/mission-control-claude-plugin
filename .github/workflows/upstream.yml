@@ -103,10 +103,10 @@ jobs:
             exit 0
           fi
           if [ "$merged" != "0" ]; then
-            # merged, yet master doesn't hold this tag at this commit: upstream may have
-            # moved a released tag (a supply-chain signal), so fail and notify
-            echo "::error::a pull request from ${branch} was merged, but master does not hold ${TAG} at ${COMMIT}. Upstream may have moved the tag, the vendored files may have been reverted, or this run raced the merge. Check upstream before vendoring by hand (npm run vendor -- ${TAG})."
-            exit 1
+            # a moved tag fails earlier, in vendor-upstream.ts; this is e.g. a revert on
+            # master or a run that raced the merge
+            echo "::notice::a pull request from ${branch} was merged before; not opening another"
+            exit 0
           fi
           if [ "$rejected" != "0" ]; then
             # closing the PR rejects the tag; its branch is left alone, so reopening undoes it
