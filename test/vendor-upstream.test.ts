@@ -69,19 +69,12 @@ const workspace = (pin: Record<string, string> = DEFAULT_PIN) => {
   writeFileSync(path.join(dir, "fetch-stub.mjs"), FETCH_STUB);
   const read = (file: string) => readFileSync(path.join(dir, file), "utf-8");
   return {
-    outputs: () => {
-      try {
-        return read("outputs");
-      } catch {
-        return "";
-      }
-    },
     pinned: () =>
       JSON.parse(read("upstream.json")) as { tag: string; commit: string },
     read,
     run: (args: string[], env: Record<string, string> = {}) =>
       runScript(path.join(dir, "scripts/vendor-upstream.ts"), args, {
-        env: { GITHUB_OUTPUT: path.join(dir, "outputs"), ...env },
+        env,
         nodeArgs: ["--import", path.join(dir, "fetch-stub.mjs")],
       }),
     version: () => (JSON.parse(read(manifest)) as { version: string }).version,
@@ -96,19 +89,20 @@ describe("vendor-upstream", () => {
       const r = await ws.run(args, { LATEST: "v2.3.0", MOVED: "1" });
       expect(r.code).toBe(1);
       expect(r.stderr).toMatch(
-        /upstream moved v2\.3\.0 from a{40} to b{40}.*--accept-moved/u
+        /upstream moved v2\.3\.0 from a{40} to b{40}.*by hand/u
       );
       expect(ws.pinned().commit).toBe(VENDORED);
     }
   );
 
-  test("takes a moved vendored tag with <tag> --accept-moved", async () => {
-    const ws = workspace();
-    const before = ws.version();
-    const r = await ws.run(["v2.3.0", "--accept-moved"], { MOVED: "1" });
+  test("takes a moved tag after its commit was set in upstream.json by hand", async () => {
+    const ws = workspace({ ...DEFAULT_PIN, commit: MOVED });
+    const r = await ws.run([], { MOVED: "1" });
     expect(r.code, r.stderr).toBe(0);
-    expect(ws.pinned()).toEqual({ commit: MOVED, repo: "o/r", tag: "v2.3.0" });
-    expect(ws.version()).not.toBe(before);
+    expect(r.stdout).toMatch(/unchanged at o\/r@v2\.3\.0 \(b{40}\)/u);
+    expect(
+      ws.read("plugins/mission-control/scripts/LICENSE.mission-control")
+    ).toBe("vendored\n");
   });
 
   test("does not downgrade when the latest release is older", async () => {
@@ -140,7 +134,8 @@ describe("vendor-upstream", () => {
   test.each([
     [["v2.2.0", "v2.4.0"], /usage/u],
     [["v02.3.0"], /unexpected tag/u],
-    [["v2.4.0", "--accept-moved"], /only applies to the vendored v2\.3\.0/u],
+    [["v2.3.0", "--accept-moved"], /usage/u],
+    [["v2.2.0"], /v2\.2\.0 is older than the vendored v2\.3\.0/u],
   ])("rejects arguments %j", async (args, message) => {
     const ws = workspace();
     const r = await ws.run(args);

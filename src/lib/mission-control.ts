@@ -155,7 +155,6 @@ const checked = <T>(method: string, route: string, result: ApiResult): T => {
 
 interface AgentResponse {
   agent?: { id?: number | string; name?: string };
-  registered?: boolean;
 }
 
 interface KeyResponse {

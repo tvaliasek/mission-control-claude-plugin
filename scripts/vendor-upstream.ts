@@ -2,12 +2,13 @@
  Vendors the Mission Control MCP server into the plugin and re-applies our patch.
 
  Usage:
-   node scripts/vendor-upstream.ts                       re-vendor the tag in upstream.json
-   node scripts/vendor-upstream.ts v2.4.0                vendor that tag
-   node scripts/vendor-upstream.ts --latest              vendor the latest upstream release,
-                                                         unless it is older than the vendored one
-   node scripts/vendor-upstream.ts v2.3.0 --accept-moved take the vendored tag after upstream
-                                                         moved it to another commit
+   node scripts/vendor-upstream.ts            re-vendor the tag and commit in upstream.json
+   node scripts/vendor-upstream.ts v2.4.0     vendor that (newer) tag
+   node scripts/vendor-upstream.ts --latest   vendor the latest upstream release, if newer
+
+ Refused: an older tag than the vendored one, and the vendored tag once upstream moved
+ it to another commit. To take either on purpose, edit tag and commit in upstream.json,
+ run the script without arguments and bump the plugin version by hand.
 
  Files are fetched at the tag's commit SHA. When the tag changes, upstream.json is
  updated and the plugin's patch version is bumped, so installed plugins update.
@@ -134,16 +135,6 @@ const commitOf = async (repo: string, tag: string): Promise<string> => {
   return sha;
 };
 
-const parseArgs = (args: string[]) => {
-  const acceptMoved = args[1] === "--accept-moved";
-  if (args.length > (acceptMoved ? 2 : 1)) {
-    throw new Error(
-      "usage: vendor-upstream.ts [<tag> | --latest | <vendored tag> --accept-moved]"
-    );
-  }
-  return { acceptMoved, arg: args[0] };
-};
-
 const readPinned = (): Upstream => {
   const current = JSON.parse(readFileSync(UPSTREAM_JSON, "utf-8")) as Upstream;
   if (
@@ -159,20 +150,24 @@ const readPinned = (): Upstream => {
 };
 
 const main = async () => {
-  const { acceptMoved, arg } = parseArgs(process.argv.slice(2));
+  const args = process.argv.slice(2);
+  if (args.length > 1) {
+    throw new Error("usage: vendor-upstream.ts [<tag> | --latest]");
+  }
+  const [arg] = args;
   const current = readPinned();
   const tag = await resolveTag(arg, current);
   if (!TAG_RE.test(tag)) {
     throw new Error(`unexpected tag "${tag}"`);
   }
-  if (acceptMoved && tag !== current.tag) {
-    throw new Error(
-      `--accept-moved only applies to the vendored ${current.tag}`
-    );
-  }
-  // the latest release can go back (newest one deleted, an older one marked latest):
-  // keep what is vendored instead of a downgrade
-  if (arg === "--latest" && isOlder(tag, current.tag)) {
+  // never downgrade: the latest release can go back (newest one deleted, an older one
+  // marked latest), and a mistyped tag must not ship an older server
+  if (isOlder(tag, current.tag)) {
+    if (arg !== "--latest") {
+      throw new Error(
+        `${tag} is older than the vendored ${current.tag}; to roll back, edit upstream.json by hand`
+      );
+    }
     process.stdout.write(
       `latest release ${tag} is older than the vendored ${current.tag}; unchanged\n`
     );
@@ -180,9 +175,9 @@ const main = async () => {
   }
   const sha = await commitOf(current.repo, tag);
   // a released tag now pointing elsewhere is a possible upstream compromise
-  if (tag === current.tag && sha !== current.commit && !acceptMoved) {
+  if (tag === current.tag && sha !== current.commit) {
     throw new Error(
-      `upstream moved ${tag} from ${current.commit} to ${sha}; check upstream, then take it with: npm run vendor -- ${tag} --accept-moved`
+      `upstream moved ${tag} from ${current.commit} to ${sha}; check upstream, then to take it set that commit in upstream.json by hand`
     );
   }
 
