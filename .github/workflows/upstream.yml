@@ -23,6 +23,8 @@ jobs:
   # code (the tests start the vendored server), so nothing from this job except its
   # outputs reaches the job that holds a write token.
   vendor:
+    # from master only: another ref's workflow and tree would end up in a PR to master
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.vendor.outputs.changed }}
@@ -79,30 +81,24 @@ jobs:
           # (fine-grained PAT: contents + pull requests) to have CI run on them.
           GH_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN || github.token }}
           TAG: ${{ needs.vendor.outputs.tag }}
-          COMMIT: ${{ needs.vendor.outputs.commit }}
         run: |
           branch="upstream/${TAG}"
+          # this repository's PRs from that branch only (filtered by owner on the server,
+          # so fork PRs with the same branch name don't count). Closing the PR rejects
+          # the tag: no new PR is opened for it, the next upstream release gets one.
+          count=$(gh api "repos/${GITHUB_REPOSITORY}/pulls?head=${GITHUB_REPOSITORY_OWNER}:${branch}&state=all" --jq length)
+          if [ "$count" != "0" ]; then
+            echo "::notice::a pull request from ${branch} already exists"
+            exit 0
+          fi
+          # upstream/* branches belong to this workflow: replace whatever an earlier,
+          # failed run left there with the tree vendored and checked now
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A plugins/ upstream.json
+          git commit -m "Vendor Mission Control ${TAG} MCP server"
           remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          # refs/heads/ explicitly: a tag of the same name must not count as the branch
-          if git fetch --no-tags --depth=1 "$remote" "refs/heads/$branch" 2>/dev/null; then
-            # a branch left by an earlier run must hold exactly this tree: master plus
-            # what was just vendored. If master moved on, delete the stale branch.
-            git add -A plugins/ upstream.json
-            git diff --cached --quiet FETCH_HEAD
-          else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git switch -c "$branch"
-            git add -A plugins/ upstream.json
-            git commit -m "Vendor Mission Control ${TAG} MCP server"
-            git push "$remote" "$branch"
-          fi
-          # a rerun after a failed `gh pr create` finds the branch and still opens the PR
-          # only this repository's PRs count: anyone can open a fork PR from a branch with this name
-          # assigned first, so a failing gh stops the step instead of skipping the PR
-          count=$(gh pr list --head "$branch" --state all --limit 1000 --json isCrossRepository --jq '[.[] | select(.isCrossRepository | not)] | length')
-          if [ "$count" = "0" ]; then
-            gh pr create --base master --head "$branch" \
-              --title "Vendor Mission Control ${TAG}" \
-              --body "Re-vendors scripts/mc-mcp-server.cjs and mc-base-url.cjs from builderz-labs/mission-control ${TAG}, re-applies the loadConfig patch and bumps the plugin version. Review the upstream diff for new tools or changed endpoints before merging."
-          fi
+          git push --force "$remote" "HEAD:refs/heads/${branch}"
+          gh pr create --base master --head "$branch" \
+            --title "Vendor Mission Control ${TAG}" \
+            --body "Re-vendors scripts/mc-mcp-server.cjs and mc-base-url.cjs from builderz-labs/mission-control ${TAG}, re-applies the loadConfig patch and bumps the plugin version. Review the upstream diff for new tools or changed endpoints before merging."
