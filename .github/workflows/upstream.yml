@@ -1,126 +1,45 @@
 name: Upstream release
 
-# Re-vendors the Mission Control MCP server when upstream publishes a release
-# and opens a pull request with the rebuilt plugin.
+# Fails (GitHub emails the failure) when Mission Control has a release newer than
+# the vendored one, or moved the vendored tag to another commit. Runs no upstream
+# code and has no write access; vendor by hand in a pull request instead:
+# npm run vendor -- vX.Y.Z
 on:
   schedule:
     - cron: "17 6 * * *"
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Upstream tag to vendor, e.g. v2.4.0 (default: latest release)"
-        required: false
 
 permissions:
   contents: read
 
-concurrency:
-  group: upstream-release
-  cancel-in-progress: false
-
 jobs:
-  # Vendors and checks with a read-only token. `npm run check` runs the new upstream
-  # code (the tests start the vendored server), so nothing from this job except its
-  # outputs reaches the job that holds a write token.
-  vendor:
-    # guards against dispatching from another branch by mistake, whose tree would end up
-    # in a PR to master; not a boundary (another ref's copy of this file can drop it)
-    if: github.ref == 'refs/heads/master'
+  check:
     runs-on: ubuntu-latest
-    outputs:
-      changed: ${{ steps.vendor.outputs.changed }}
-      commit: ${{ steps.vendor.outputs.commit }}
-      tag: ${{ steps.vendor.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24
-          # a cache saved after upstream code ran would be restored by other workflows
-          package-manager-cache: false
-      - run: npm ci
-      - id: vendor
+      - name: Compare with the vendored release
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag }}
-        run: node scripts/vendor-upstream.ts "${TAG:---latest}"
-      - if: steps.vendor.outputs.changed == 'true'
-        run: npm run check
-
-  # Re-vendors the tested commit with the dependency-free vendor script, commits and
-  # opens the pull request. Runs no dependency or upstream code and takes no files
-  # from the vendor job.
-  pull-request:
-    needs: vendor
-    if: needs.vendor.outputs.changed == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24
-          package-manager-cache: false
-      - name: Vendor the tested commit
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.vendor.outputs.tag }}
-          COMMIT: ${{ needs.vendor.outputs.commit }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          node scripts/vendor-upstream.ts "$TAG"
-          # the tag must still point at the commit the vendor job checked
-          test "$(node -p 'require("./upstream.json").commit')" = "$COMMIT"
-      - name: Push branch and open pull request
-        env:
-          # PRs opened with the default token do not trigger CI; set UPSTREAM_PR_TOKEN
-          # (fine-grained PAT: contents + pull requests) to have CI run on them.
-          GH_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN || github.token }}
-          TAG: ${{ needs.vendor.outputs.tag }}
-          COMMIT: ${{ needs.vendor.outputs.commit }}
-        run: |
-          branch="upstream/${TAG}"
-          # this repository's PRs from that branch only (filtered by owner on the server,
-          # so fork PRs with the same branch name don't count):
-          # "<all> <open> <closed unmerged> <merged>"; anything unexpected fails the step
-          counts=$(gh api "repos/${GITHUB_REPOSITORY}/pulls?head=${GITHUB_REPOSITORY_OWNER}:${branch}&state=all" \
-            --jq 'if type != "array" then error("not a list") else "\(length) \(map(select(.state == "open")) | length) \(map(select(.state == "closed" and .merged_at == null)) | length) \(map(select(.state == "closed" and .merged_at != null)) | length)" end')
-          read -r total open rejected merged <<<"$counts"
-          case "${total}:${open}:${rejected}:${merged}" in
-            *[!0-9:]* | :* | *: | *::*) echo "::error::unexpected answer listing pull requests: ${counts}"; exit 1 ;;
-          esac
-          if [ "$total" -ne $((open + rejected + merged)) ]; then
-            echo "::error::unexpected pull request states: ${counts}"
+          repo=$(jq -r .repo upstream.json)
+          tag=$(jq -r .tag upstream.json)
+          commit=$(jq -r .commit upstream.json)
+          now=$(gh api "repos/${repo}/commits/${tag}" --jq .sha)
+          latest=$(gh api "repos/${repo}/releases/latest" --jq .tag_name)
+          # both come from upstream: check them before they reach a log line
+          [[ $now =~ ^[0-9a-f]{40}$ && $latest =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::unexpected answer from the GitHub API"
+            exit 1
+          }
+          if [ "$now" != "$commit" ]; then
+            echo "::error::upstream moved ${tag} from ${commit} to ${now}. Check upstream; to take it: npm run vendor -- ${tag} --accept-moved"
             exit 1
           fi
-          if [ "$open" != "0" ]; then
-            echo "::notice::a pull request from ${branch} is open"
-            exit 0
+          newest=$(printf '%s\n%s\n' "$tag" "$latest" | sort -V | tail -n 1)
+          if [ "$newest" != "$tag" ]; then
+            echo "::error::Mission Control ${latest} is out (vendored: ${tag}). Review it and vendor it in a pull request: npm run vendor -- ${latest}"
+            exit 1
           fi
-          if [ "$merged" != "0" ]; then
-            # a moved tag fails earlier, in vendor-upstream.ts; this is e.g. a revert on
-            # master or a run that raced the merge
-            echo "::notice::a pull request from ${branch} was merged before; not opening another"
-            exit 0
-          fi
-          if [ "$rejected" != "0" ]; then
-            # closing the PR rejects the tag; its branch is left alone, so reopening undoes it
-            echo "::warning::the pull request from ${branch} was closed, so ${TAG} is not vendored; reopen it (restore its branch first if it was deleted) to take ${TAG} after all"
-            exit 0
-          fi
-          # upstream/* branches belong to this workflow: replace whatever an earlier,
-          # failed run left there with the tree vendored and checked now
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A plugins/ upstream.json
-          git commit -m "Vendor Mission Control ${TAG} MCP server"
-          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git push --force "$remote" "HEAD:refs/heads/${branch}"
-          gh pr create --base master --head "$branch" \
-            --title "Vendor Mission Control ${TAG}" \
-            --body "Re-vendors scripts/mc-mcp-server.cjs and mc-base-url.cjs from builderz-labs/mission-control ${TAG}, re-applies the loadConfig patch and bumps the plugin version. Review the upstream diff for new tools or changed endpoints before merging."
+          echo "vendored ${tag} is current"

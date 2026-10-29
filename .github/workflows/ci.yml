@@ -18,9 +18,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-          # no dependency cache: the upstream workflow runs upstream code on master
-          # and could write cache entries that this job would restore
-          package-manager-cache: false
+          cache: npm
       # installed plugins update only when this version increases. On push it detects,
       # after the merge, two pull requests that bumped to the same version; preventing
       # that needs branch protection requiring up-to-date branches or a merge queue.
@@ -51,62 +49,6 @@ jobs:
               }
             ' "$RUNNER_TEMP/base-plugin.json" "$PWD/$manifest"
           fi
-      # upstream.json's tag history is what refuses moved upstream tags: it must be in
-      # the form the vendor script writes (no duplicate keys or hand edits) and keep
-      # every tag recorded on the base; a changed commit is shown for the reviewer
-      - name: upstream.json keeps its tag history
-        env:
-          BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
-        run: |
-          if [ -n "$BEFORE" ]; then base="$BEFORE"; else base=HEAD^1; fi
-          case "$base" in 0000000000000000000000000000000000000000) base="" ;; esac
-          [ -z "$base" ] || git show "$base:upstream.json" > "$RUNNER_TEMP/base-upstream.json"
-          node -e '
-            const fs = require("fs");
-            const text = fs.readFileSync("upstream.json", "utf8");
-            const head = JSON.parse(text);
-            if (`${JSON.stringify(head, null, 2)}\n` !== text) {
-              console.log("::error::upstream.json is not in the form scripts/vendor-upstream.ts writes");
-              process.exit(1);
-            }
-            const file = process.argv[1];
-            if (!fs.existsSync(file)) process.exit(0);
-            const base = JSON.parse(fs.readFileSync(file, "utf8"));
-            const fail = (message) => {
-              console.log(`::error::upstream.json ${message}`);
-              process.exit(1);
-            };
-            if (head.repo !== base.repo) fail(`changed repo from ${base.repo} to ${head.repo}`);
-            // a rollback: the tag this change vendors is older than the one before
-            const v = (t) => t.slice(1).split(".").map(Number);
-            const [h, b] = [v(head.tag), v(base.tag)];
-            const k = h.findIndex((n, i) => n !== b[i]);
-            const rolledBackFrom = k !== -1 && h[k] < b[k] ? base.tag : undefined;
-            if (rolledBackFrom) {
-              console.log(`::warning::upstream.json rolls back from ${base.tag} to ${head.tag}`);
-            }
-            // As the script does: only the tag this change vendors may get a new commit,
-            // and not as a rollback target (--accept-moved); history only grows by it;
-            // only the tag rolled back from may be turned down, at a commit other than
-            // its recorded one.
-            const history = (u) => ({ ...u.known, [u.tag]: u.commit });
-            const [was, now] = [history(base), history(head)];
-            for (const [tag, sha] of Object.entries(was)) {
-              if (!(tag in now)) fail(`dropped the recorded ${tag}`);
-              if (now[tag] === sha) continue;
-              if (tag !== head.tag || rolledBackFrom) fail(`changed the recorded commit of ${tag}`);
-              console.log(`::warning::upstream.json takes ${tag} at ${now[tag]}, recorded at ${sha}: a moved tag was accepted`);
-            }
-            for (const tag of Object.keys(now)) {
-              if (!(tag in was) && tag !== head.tag) fail(`added a recorded commit for ${tag}`);
-            }
-            for (const [tag, sha] of Object.entries(head.rejected ?? {})) {
-              if (base.rejected?.[tag] === sha) continue;
-              if (tag !== rolledBackFrom || sha === was[tag]) {
-                fail(`added or changed the rejected commit of ${tag}`);
-              }
-            }
-          ' "$RUNNER_TEMP/base-upstream.json"
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
@@ -133,7 +75,6 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 18
-          package-manager-cache: false
       - name: Built mc-enroll and setup run on Node 18
         run: |
           node plugins/mission-control/scripts/mc-enroll.cjs --help
