@@ -83,9 +83,12 @@ jobs:
         run: |
           branch="upstream/${TAG}"
           remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          if git fetch --no-tags --depth=1 "$remote" "$branch" 2>/dev/null; then
-            # a branch left by an earlier run must hold the commit this run tested
-            test "$(git show FETCH_HEAD:upstream.json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).commit')" = "$COMMIT"
+          # refs/heads/ explicitly: a tag of the same name must not count as the branch
+          if git fetch --no-tags --depth=1 "$remote" "refs/heads/$branch" 2>/dev/null; then
+            # a branch left by an earlier run must hold exactly this tree: master plus
+            # what was just vendored. If master moved on, delete the stale branch.
+            git add -A plugins/ upstream.json
+            git diff --cached --quiet FETCH_HEAD
           else
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -96,7 +99,9 @@ jobs:
           fi
           # a rerun after a failed `gh pr create` finds the branch and still opens the PR
           # only this repository's PRs count: anyone can open a fork PR from a branch with this name
-          if [ "$(gh pr list --head "$branch" --state all --json isCrossRepository --jq '[.[] | select(.isCrossRepository | not)] | length')" = "0" ]; then
+          # assigned first, so a failing gh stops the step instead of skipping the PR
+          count=$(gh pr list --head "$branch" --state all --limit 1000 --json isCrossRepository --jq '[.[] | select(.isCrossRepository | not)] | length')
+          if [ "$count" = "0" ]; then
             gh pr create --base master --head "$branch" \
               --title "Vendor Mission Control ${TAG}" \
               --body "Re-vendors scripts/mc-mcp-server.cjs and mc-base-url.cjs from builderz-labs/mission-control ${TAG}, re-applies the loadConfig patch and bumps the plugin version. Review the upstream diff for new tools or changed endpoints before merging."

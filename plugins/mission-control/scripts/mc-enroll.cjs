@@ -289,10 +289,9 @@ const HTTP_NOT_FOUND = 404;
 const HTTP_UNAUTHORIZED = 401;
 const HTTP_FORBIDDEN = 403;
 const DAY_MS = 86400000;
-// C0/C1 control characters (e.g. ESC), bidi controls, zero-width characters and line
-// separators: server text must not drive the terminal or change what it shows
-const CONTROL_CHARS_RE = // oxlint-disable-next-line no-control-regex
-/[\u0000-\u001F\u007F-\u009F\u061C\u200B-\u200F\u2028-\u202E\u2066-\u2069\uFEFF]/gu;
+// Control, format (bidi, zero-width, tag) and line/paragraph separator characters:
+// server text must not drive the terminal or change what it shows
+const CONTROL_CHARS_RE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
 // Text from the server, made safe to print.
 const printable = (value)=>String(value).replaceAll(CONTROL_CHARS_RE, "?");
 // names that read as a number (e.g. 42, 1e3) are rejected because Mission Control
@@ -438,15 +437,11 @@ const enrollAgent = async (opts)=>{
             "operator"
         ]
     }));
-    if (!issued.api_key) {
-        return cli_fail("unexpected response from the key endpoint");
-    }
     const expires = new Date(Date.now() + opts.expiresDays * DAY_MS);
     // logged first, so a key refused below can still be found and revoked by its id
     cli_log(`issued key ${printable(issued.key?.key_prefix ?? "")}… (id ${printable(issued.key?.id ?? "?")}), expires on ${expires.toISOString().slice(0, 10)}; issue a new one before then`);
     // it is printed into shell export lines and saved as a header value
-    checkKey(issued.api_key, "issued key");
-    return issued.api_key;
+    return checkKey(issued.api_key, "issued key");
 };
 // Checks that the key is an agent key of this agent: Mission Control rejects an
 // agent key whose agent differs from x-agent-name, and only an admin key can list
