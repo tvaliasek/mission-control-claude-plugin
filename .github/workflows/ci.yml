@@ -77,24 +77,34 @@ jobs:
               process.exit(1);
             };
             if (head.repo !== base.repo) fail(`changed repo from ${base.repo} to ${head.repo}`);
-            // only the tag this change vendors may get a new commit (--accept-moved), and
-            // only the tag it rolls back from may be newly turned down
+            // a rollback: the tag this change vendors is older than the one before
+            const v = (t) => t.slice(1).split(".").map(Number);
+            const [h, b] = [v(head.tag), v(base.tag)];
+            const k = h.findIndex((n, i) => n !== b[i]);
+            const rolledBackFrom = k !== -1 && h[k] < b[k] ? base.tag : undefined;
+            if (rolledBackFrom) {
+              console.log(`::warning::upstream.json rolls back from ${base.tag} to ${head.tag}`);
+            }
+            // As the script does: only the tag this change vendors may get a new commit,
+            // and not as a rollback target (--accept-moved); history only grows by it;
+            // only the tag rolled back from may be turned down, at a commit other than
+            // its recorded one.
             const history = (u) => ({ ...u.known, [u.tag]: u.commit });
             const [was, now] = [history(base), history(head)];
             for (const [tag, sha] of Object.entries(was)) {
               if (!(tag in now)) fail(`dropped the recorded ${tag}`);
               if (now[tag] === sha) continue;
-              if (tag !== head.tag) fail(`changed the recorded commit of ${tag}`);
+              if (tag !== head.tag || rolledBackFrom) fail(`changed the recorded commit of ${tag}`);
               console.log(`::warning::upstream.json takes ${tag} at ${now[tag]}, recorded at ${sha}: a moved tag was accepted`);
             }
-            const v = (t) => t.slice(1).split(".").map(Number);
-            const [h, b] = [v(head.tag), v(base.tag)];
-            const k = h.findIndex((n, i) => n !== b[i]);
-            const rolledBackFrom = k !== -1 && h[k] < b[k] ? base.tag : undefined;
+            for (const tag of Object.keys(now)) {
+              if (!(tag in was) && tag !== head.tag) fail(`added a recorded commit for ${tag}`);
+            }
             for (const [tag, sha] of Object.entries(head.rejected ?? {})) {
               if (base.rejected?.[tag] === sha) continue;
-              if (tag !== rolledBackFrom) fail(`added or changed the rejected commit of ${tag}`);
-              console.log(`::warning::upstream.json rolls back from ${tag}, turning down its commit ${sha}`);
+              if (tag !== rolledBackFrom || sha === was[tag]) {
+                fail(`added or changed the rejected commit of ${tag}`);
+              }
             }
           ' "$RUNNER_TEMP/base-upstream.json"
       - run: npm ci
