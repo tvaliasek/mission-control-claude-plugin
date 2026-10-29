@@ -22,7 +22,8 @@ const OLDER = "2".repeat(40);
 // Replaces fetch with fixed answers: releases/latest returns LATEST, v2.3.0 resolves to
 // the vendored commit or, with MOVED set, to another one.
 const FETCH_STUB = `
-const shas = { "v2.2.0": "${OLDER}", "v2.3.0": process.env.MOVED ? "${MOVED}" : "${VENDORED}", "v2.4.0": "${NEWER}" };
+const moved = { 1: "${MOVED}", 2: "${"d".repeat(40)}" }[process.env.MOVED];
+const shas = { "v2.2.0": "${OLDER}", "v2.3.0": moved ?? "${VENDORED}", "v2.4.0": "${NEWER}" };
 if (process.env.DELETED) delete shas["v2.3.0"];
 globalThis.fetch = async (url) => {
   const u = String(url);
@@ -196,20 +197,50 @@ describe("vendor-upstream", () => {
     expect(rollback.pinned().tag).toBe("v2.2.0");
   });
 
-  test("keeps refusing a tag after rolling back past it", async () => {
+  test("a rollback turns down the moved commit, and only that one", async () => {
     const ws = workspace();
     const back = await ws.run(["v2.2.0", "--accept-moved"], { MOVED: "1" });
     expect(back.code, back.stderr).toBe(0);
-    expect(JSON.parse(ws.read("upstream.json")).known).toEqual({
-      "v2.2.0": OLDER,
-      "v2.3.0": VENDORED,
+    expect(JSON.parse(ws.read("upstream.json"))).toMatchObject({
+      known: { "v2.2.0": OLDER, "v2.3.0": VENDORED },
+      rejected: { "v2.3.0": MOVED },
     });
 
-    // v2.3.0 is newer than the rolled-back pin, but still moved
-    const r = await ws.run(["--latest"], { LATEST: "v2.3.0", MOVED: "1" });
-    expect(r.code).toBe(1);
-    expect(r.stderr).toMatch(/upstream moved v2\.3\.0 from a{40} to b{40}/u);
+    // the turned-down commit is not proposed again...
+    const same = await ws.run(["--latest"], { LATEST: "v2.3.0", MOVED: "1" });
+    expect(same.code, same.stderr).toBe(0);
+    expect(same.stdout).toMatch(
+      /rejected by a rollback; unchanged at v2\.2\.0/u
+    );
+    expect(ws.outputs()).toContain("changed=false");
     expect(ws.pinned().tag).toBe("v2.2.0");
+
+    // ...but the tag moving anywhere else fails again
+    const again = await ws.run(["--latest"], { LATEST: "v2.3.0", MOVED: "2" });
+    expect(again.code).toBe(1);
+    expect(again.stderr).toMatch(
+      /upstream moved v2\.3\.0 from a{40} to d{40}/u
+    );
+
+    // and a person can still take it on purpose
+    const take = await ws.run(["v2.3.0", "--accept-moved"], { MOVED: "1" });
+    expect(take.code, take.stderr).toBe(0);
+    expect(JSON.parse(ws.read("upstream.json"))).toMatchObject({
+      commit: MOVED,
+      rejected: {},
+      tag: "v2.3.0",
+    });
+  });
+
+  test("does not roll back to a recorded tag that moved too", async () => {
+    const ws = workspace({
+      ...DEFAULT_PIN,
+      known: { "v2.2.0": "e".repeat(40) },
+    });
+    const r = await ws.run(["v2.2.0", "--accept-moved"], { MOVED: "1" });
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/upstream moved v2\.2\.0 from e{40} to 2{40}/u);
+    expect(ws.pinned().tag).toBe("v2.3.0");
   });
 
   test("does not offer taking a vendored tag that was removed", async () => {
@@ -231,11 +262,16 @@ describe("vendor-upstream", () => {
     expect(r.stderr).toMatch(/unexpected repo, tag or commit/u);
   });
 
-  test("refuses an invalid known entry in upstream.json", async () => {
-    const ws = workspace({ ...DEFAULT_PIN, known: { "v2.2.0": "nope" } });
+  test.each([
+    [{ known: { "v2.2.0": "nope" } }],
+    [{ known: 5 }],
+    [{ known: [] }],
+    [{ rejected: { v2: "a".repeat(40) } }],
+  ])("refuses an invalid history in upstream.json %j", async (history) => {
+    const ws = workspace({ ...DEFAULT_PIN, ...history });
     const r = await ws.run([]);
     expect(r.code).toBe(1);
-    expect(r.stderr).toMatch(/unexpected entry in "known"/u);
+    expect(r.stderr).toMatch(/unexpected "(?:known|rejected)"/u);
   });
 
   test.each([

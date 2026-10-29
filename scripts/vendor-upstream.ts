@@ -28,6 +28,8 @@ const PLUGIN_JSON = path.join(
 const SCRIPTS_DIR = path.join(ROOT, "plugins/mission-control/scripts");
 const SHA_RE = /^[0-9a-f]{40}$/u;
 const REPO_RE = /^[\w-]+\/(?!\.{1,2}$)[\w.-]+$/u;
+// what github() reports for a ref (or repository) that does not exist
+const NOT_FOUND_RE = /HTTP (?:404|422)$/u;
 // no leading zeros: v02.3.0 must not pass as a release other than v2.3.0
 const TAG_RE = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const VERSION_FIELD_RE =
@@ -61,6 +63,8 @@ interface Upstream {
   // every tag vendored before, with its commit then: a tag that now points elsewhere
   // is refused, including after a rollback past it
   known?: Record<string, string>;
+  // tag -> moved commit a person turned down by rolling back past it
+  rejected?: Record<string, string>;
 }
 
 const github = async (route: string): Promise<unknown> => {
@@ -174,11 +178,58 @@ const readPinned = (): Upstream => {
   ) {
     throw new Error(`unexpected repo, tag or commit in ${UPSTREAM_JSON}`);
   }
-  const known = Object.entries(current.known ?? {});
-  if (!known.every(([t, sha]) => TAG_RE.test(t) && SHA_RE.test(sha))) {
-    throw new Error(`unexpected entry in "known" in ${UPSTREAM_JSON}`);
+  for (const field of ["known", "rejected"] as const) {
+    const map: unknown = current[field];
+    const valid =
+      map === undefined ||
+      (typeof map === "object" &&
+        map !== null &&
+        !Array.isArray(map) &&
+        Object.entries(map).every(
+          ([t, sha]) => TAG_RE.test(t) && SHA_RE.test(String(sha))
+        ));
+    if (!valid) {
+      throw new Error(`unexpected "${field}" in ${UPSTREAM_JSON}`);
+    }
   }
   return current;
+};
+
+// upstream.json after vendoring tag at sha; rejection is the moved commit of the
+// tag rolled back from, if any
+const nextPin = (
+  current: Upstream,
+  tag: string,
+  sha: string,
+  rejection: string | undefined
+): Upstream => {
+  const rejected = Object.fromEntries(
+    Object.entries(current.rejected ?? {}).filter(([t]) => t !== tag)
+  );
+  if (rejection) {
+    rejected[current.tag] = rejection;
+  }
+  return {
+    ...current,
+    commit: sha,
+    known: { ...current.known, [current.tag]: current.commit, [tag]: sha },
+    rejected,
+    tag,
+  };
+};
+
+// On a rollback, the moved commit of the tag rolled back from, so later runs don't
+// propose it again; undefined if it did not move or no longer exists.
+const movedFrom = async (current: Upstream): Promise<string | undefined> => {
+  try {
+    const sha = await commitOf(current.repo, current.tag);
+    return sha === current.commit ? undefined : sha;
+  } catch (error) {
+    if (error instanceof Error && NOT_FOUND_RE.test(error.message)) {
+      return;
+    }
+    throw error;
+  }
 };
 
 const ROLL_BACK =
@@ -188,8 +239,6 @@ const movedError = (tag: string, from: string, to: string) =>
   new Error(
     `upstream moved ${tag} from ${from} to ${to}; check upstream, then take it with: npm run vendor -- ${tag} --accept-moved, or ${ROLL_BACK}`
   );
-
-const NOT_FOUND_RE = /HTTP (?:404|422)$/u;
 
 // A vendored tag that upstream moved to another commit, or removed, is a possible
 // upstream compromise: refuse to go on until someone checks and takes a tag on
@@ -211,6 +260,27 @@ const checkVendoredTag = async (current: Upstream): Promise<string> => {
     throw movedError(current.tag, current.commit, sha);
   }
   return sha;
+};
+
+// True when tag at sha is a commit a person turned down by rolling back past it.
+// Throws when a tag vendored before no longer points to the commit it had then;
+// --accept-moved takes the named tag as it is now, except as a rollback target:
+// going back must land on a commit that was vendored before.
+const turnedDown = (
+  current: Upstream,
+  tag: string,
+  sha: string,
+  acceptMoved: boolean
+): boolean => {
+  if (current.rejected?.[tag] === sha && !acceptMoved) {
+    return true;
+  }
+  const rollback = isOlder(tag, current.tag);
+  const recorded = tag === current.tag ? current.commit : current.known?.[tag];
+  if (recorded && recorded !== sha && !(acceptMoved && !rollback)) {
+    throw movedError(tag, recorded, sha);
+  }
+  return false;
 };
 
 const main = async () => {
@@ -239,11 +309,17 @@ const main = async () => {
     tag === current.tag && vendoredSha
       ? vendoredSha
       : await commitOf(current.repo, tag);
-  // a tag vendored before must still point to the commit it had then
-  const recorded = tag === current.tag ? current.commit : current.known?.[tag];
-  if (recorded && recorded !== sha && !acceptMoved) {
-    throw movedError(tag, recorded, sha);
+  if (turnedDown(current, tag, sha, acceptMoved)) {
+    process.stdout.write(
+      `${tag} at ${sha} was rejected by a rollback; unchanged at ${current.tag}\n`
+    );
+    writeOutputs(false, current.tag, current.commit);
+    return;
   }
+  const rejection =
+    acceptMoved && isOlder(tag, current.tag)
+      ? await movedFrom(current)
+      : undefined;
 
   // compute every output before writing any, so a failure leaves no mixed state
   const contents = await Promise.all(
@@ -263,20 +339,7 @@ const main = async () => {
     outputs.push(
       [
         UPSTREAM_JSON,
-        `${JSON.stringify(
-          {
-            ...current,
-            commit: sha,
-            known: {
-              ...current.known,
-              [current.tag]: current.commit,
-              [tag]: sha,
-            },
-            tag,
-          },
-          null,
-          2
-        )}\n`,
+        `${JSON.stringify(nextPin(current, tag, sha, rejection), null, 2)}\n`,
       ],
       [PLUGIN_JSON, bumpPatchVersion(readFileSync(PLUGIN_JSON, "utf-8"))]
     );

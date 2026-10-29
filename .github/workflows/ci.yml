@@ -51,6 +51,39 @@ jobs:
               }
             ' "$RUNNER_TEMP/base-plugin.json" "$PWD/$manifest"
           fi
+      # upstream.json's tag history is what refuses moved upstream tags: it must be in
+      # the form the vendor script writes (no duplicate keys or hand edits) and keep
+      # every tag recorded on the base; a changed commit is shown for the reviewer
+      - name: upstream.json keeps its tag history
+        env:
+          BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
+        run: |
+          if [ -n "$BEFORE" ]; then base="$BEFORE"; else base=HEAD^1; fi
+          case "$base" in 0000000000000000000000000000000000000000) base="" ;; esac
+          [ -z "$base" ] || git show "$base:upstream.json" > "$RUNNER_TEMP/base-upstream.json"
+          node -e '
+            const fs = require("fs");
+            const text = fs.readFileSync("upstream.json", "utf8");
+            const head = JSON.parse(text);
+            if (`${JSON.stringify(head, null, 2)}\n` !== text) {
+              console.log("::error::upstream.json is not in the form scripts/vendor-upstream.ts writes");
+              process.exit(1);
+            }
+            const file = process.argv[1];
+            if (!fs.existsSync(file)) process.exit(0);
+            const base = JSON.parse(fs.readFileSync(file, "utf8"));
+            const history = (u) => ({ ...u.known, [u.tag]: u.commit });
+            const [was, now] = [history(base), history(head)];
+            for (const [tag, sha] of Object.entries(was)) {
+              if (!(tag in now)) {
+                console.log(`::error::upstream.json dropped the recorded ${tag}`);
+                process.exit(1);
+              }
+              if (now[tag] !== sha) {
+                console.log(`::warning::upstream.json records ${tag} at ${now[tag]}, was ${sha}: a moved tag was taken`);
+              }
+            }
+          ' "$RUNNER_TEMP/base-upstream.json"
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
