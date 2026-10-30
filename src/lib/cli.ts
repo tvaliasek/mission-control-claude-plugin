@@ -37,6 +37,13 @@ interface LineState {
   escape: number;
 }
 
+// What stopping at a question (input ended, invalid answer) means: before the key
+// is saved, the setup is aborted; once it is saved, only the questions after it are.
+let abort = { code: 1, outcome: "setup aborted" };
+export const setAbort = (code: number, outcome: string) => {
+  abort = { code, outcome };
+};
+
 const abortInput = (
   stdin: NodeJS.ReadStream,
   code: number,
@@ -72,7 +79,7 @@ const applyChar = (
     abortInput(stdin, SIGINT_EXIT_CODE);
   }
   if (ch === "\u0004") {
-    abortInput(stdin, 1, "input ended; setup aborted");
+    abortInput(stdin, abort.code, `input ended; ${abort.outcome}`);
   }
   if (ch === "\u001B") {
     state.escape = AFTER_ESC;
@@ -120,7 +127,7 @@ const readLine = async (
       return state.input.join("");
     }
   }
-  return abortInput(stdin, 1, "input ended; setup aborted");
+  return abortInput(stdin, abort.code, `input ended; ${abort.outcome}`);
 };
 
 const promptTerminal = async (question: string, echo: boolean) => {
@@ -191,7 +198,8 @@ export const createPrompter = async (): Promise<Prompter> => {
       answer !== "no"
     ) {
       // not echoed: an out-of-step piped line could be anything, e.g. a key
-      return fail("answer y or n");
+      log(`answer y or n; ${abort.outcome}`);
+      return process.exit(abort.code);
     }
     return answer.startsWith("y");
   };
@@ -204,7 +212,8 @@ export const guardUnfinished = () => {
   let finished = false;
   process.on("beforeExit", () => {
     if (!finished) {
-      fail("input ended before setup finished");
+      log(`input ended; ${abort.outcome}`);
+      process.exit(abort.code);
     }
   });
   return () => {

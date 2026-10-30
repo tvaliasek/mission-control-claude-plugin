@@ -7,7 +7,8 @@
         "MC_URL": "${user_config.mc_url}",
         "MC_API_KEY": "${user_config.mc_api_key}",
         "MC_URL_FALLBACK": "${MC_URL:-}",
-        "MC_API_KEY_FALLBACK": "${MC_API_KEY:-}"
+        "MC_API_KEY_FALLBACK": "${MC_API_KEY:-}",
+        "MC_ALLOW_HTTP": "${MC_ALLOW_HTTP:-}"
       }
     }
   }

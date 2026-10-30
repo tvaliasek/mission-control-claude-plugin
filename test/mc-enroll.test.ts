@@ -1,3 +1,5 @@
+import type { IncomingMessage, ServerResponse } from "node:http";
+
 import { afterAll, describe, expect, test } from "@rstest/core";
 
 import {
@@ -91,6 +93,280 @@ describe("mc-enroll", () => {
         "GET /api/agents/build-box",
         "POST /api/agents/7/keys",
       ]);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("--revoke-old revokes the agent's other active keys once the new one is saved", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const srv = await startMissionControl({
+      agentKeys: [
+        {
+          expires_at: null,
+          id: 1,
+          key_prefix: "mca_old11111",
+          last_used_at: null,
+          name: "old",
+          revoked_at: null,
+        },
+        {
+          expires_at: now - 60,
+          id: 2,
+          key_prefix: "mca_exp22222",
+          last_used_at: null,
+          name: "expired",
+          revoked_at: null,
+        },
+        {
+          expires_at: null,
+          id: 3,
+          key_prefix: "mca_abcdef12",
+          last_used_at: null,
+          name: "new",
+          revoked_at: null,
+        },
+      ],
+      existingAgents: ["build-box"],
+    });
+    const bins = fakeBins(["claude"]);
+    try {
+      const r = await run(
+        [
+          "--url",
+          srv.url,
+          "--agent",
+          "build-box",
+          "--existing",
+          "--revoke-old",
+        ],
+        { PATH: bins.dir }
+      );
+      expect(r.code, r.stderr).toBe(0);
+      expect(r.stdout).toBe("");
+      expect(
+        srv.requests
+          .filter((q) => q.method === "DELETE")
+          .map((q) => q.body.key_id)
+      ).toEqual([1]);
+      expect(r.stderr).toMatch(/revoked key id 1/u);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test.each([
+    [
+      500,
+      '{"error":"db"}',
+      /could not list earlier keys, none revoked: HTTP 500 db/u,
+    ],
+    [500, "null", /could not list earlier keys, none revoked: HTTP 500$/mu],
+    [200, "[]", /unexpected answer listing earlier keys, none revoked/u],
+    [
+      200,
+      '{"keys":[{"id":"1","revoked_at":null}]}',
+      /unexpected answer listing earlier keys, none revoked/u,
+    ],
+  ])(
+    "--revoke-old exits 2 but keeps the saved key when listing answers %s %s",
+    async (status, body, message) => {
+      const srv = await startMissionControl({
+        existingAgents: ["build-box"],
+        handler: (req, res) => {
+          if (req.method !== "GET" || !req.url?.endsWith("/keys")) {
+            return false;
+          }
+          res.statusCode = status;
+          res.end(body);
+          return true;
+        },
+      });
+      const bins = fakeBins(["claude"]);
+      try {
+        const r = await run(
+          [
+            "--url",
+            srv.url,
+            "--agent",
+            "build-box",
+            "--existing",
+            "--revoke-old",
+          ],
+          { PATH: bins.dir }
+        );
+        expect(r.code).toBe(2);
+        expect(r.stderr).toMatch(message);
+        expect(bins.calls()[0]?.argv).toContain("configure");
+        expect(srv.requests.some((q) => q.method === "DELETE")).toBe(false);
+      } finally {
+        srv.close();
+      }
+    }
+  );
+
+  test("--revoke-old does not look for earlier keys of a newly registered agent", async () => {
+    const srv = await startMissionControl();
+    const bins = fakeBins(["claude"]);
+    try {
+      const r = await run(
+        ["--url", srv.url, "--agent", "build-box", "--revoke-old"],
+        { PATH: bins.dir }
+      );
+      expect(r.code, r.stderr).toBe(0);
+      expect(
+        srv.requests.filter(
+          (q) => q.method === "GET" && q.url.endsWith("/keys")
+        )
+      ).toEqual([]);
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("treats a registration the server does not confirm as new as existing", async () => {
+    const srv = await startMissionControl({
+      handler: (req, res) => {
+        if (req.url !== "/api/agents/register") {
+          return false;
+        }
+        res.statusCode = 201;
+        res.end(JSON.stringify({ agent: { id: 7, name: "build-box" } }));
+        return true;
+      },
+    });
+    try {
+      const r = await run([
+        "--url",
+        srv.url,
+        "--agent",
+        "build-box",
+        "--revoke-old",
+      ]);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(/agent "build-box" already exists/u);
+      expect(srv.requests.some((q) => q.url === "/api/agents/7/keys")).toBe(
+        false
+      );
+    } finally {
+      srv.close();
+    }
+  });
+
+  test("treats an agent registered by someone else after the lookup as existing", async () => {
+    const srv = await startMissionControl({
+      existingAgents: ["build-box"],
+      // the lookup misses it; register then answers with the existing agent
+      handler: (req, res) => {
+        if (req.method !== "GET" || req.url !== "/api/agents/build-box") {
+          return false;
+        }
+        res.statusCode = 404;
+        res.end("{}");
+        return true;
+      },
+    });
+    try {
+      const r = await run([
+        "--url",
+        srv.url,
+        "--agent",
+        "build-box",
+        "--print",
+      ]);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(/agent "build-box" already exists/u);
+      expect(srv.requests.some((q) => q.url === "/api/agents/7/keys")).toBe(
+        false
+      );
+    } finally {
+      srv.close();
+    }
+  });
+
+  test.each([
+    [
+      "an agent registered by someone else after the lookup",
+      ["build-box"],
+      // the lookup misses it; register then answers with the existing agent
+      (req: IncomingMessage, res: ServerResponse) => {
+        if (req.method !== "GET" || req.url !== "/api/agents/build-box") {
+          return false;
+        }
+        res.statusCode = 404;
+        res.end("{}");
+        return true;
+      },
+    ],
+    [
+      "a registration the server does not confirm as new",
+      [],
+      (req: IncomingMessage, res: ServerResponse) => {
+        if (req.url !== "/api/agents/register") {
+          return false;
+        }
+        res.statusCode = 201;
+        res.end(JSON.stringify({ agent: { id: 7, name: "build-box" } }));
+        return true;
+      },
+    ],
+  ])(
+    "--revoke-old revokes earlier keys of %s",
+    async (_case, existingAgents, handler) => {
+      const srv = await startMissionControl({
+        agentKeys: [
+          {
+            expires_at: null,
+            id: 1,
+            key_prefix: "mca_old11111",
+            // out of Date's range: must not stop the revocation
+            last_used_at: 1e13,
+            name: "old",
+            revoked_at: null,
+          },
+        ],
+        existingAgents,
+        handler,
+      });
+      const bins = fakeBins(["claude"]);
+      try {
+        const r = await run(
+          [
+            "--url",
+            srv.url,
+            "--agent",
+            "build-box",
+            "--existing",
+            "--revoke-old",
+          ],
+          { PATH: bins.dir }
+        );
+        expect(r.code, r.stderr).toBe(0);
+        expect(
+          srv.requests
+            .filter((q) => q.method === "DELETE")
+            .map((q) => q.body.key_id)
+        ).toEqual([1]);
+      } finally {
+        srv.close();
+      }
+    }
+  );
+
+  test("refuses --revoke-old with --print before contacting the server", async () => {
+    const srv = await startMissionControl();
+    try {
+      const r = await run([
+        "--url",
+        srv.url,
+        "--agent",
+        "build-box",
+        "--revoke-old",
+        "--print",
+      ]);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(/--revoke-old can't be used with --print/u);
+      expect(srv.requests).toEqual([]);
     } finally {
       srv.close();
     }

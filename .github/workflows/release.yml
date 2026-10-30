@@ -64,3 +64,23 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
       - run: npm publish --access public --ignore-scripts
+
+  # Moves the release branch, which installed plugins follow, to the published tag.
+  # Fast-forward only: a tag that is not ahead of the branch leaves it unchanged and
+  # fails this job. Uses the API, so no repository code runs with the write token.
+  release-branch:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Fast-forward the release branch to this tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          if gh api "repos/$REPO/git/ref/heads/release" --silent; then
+            gh api -X PATCH "repos/$REPO/git/refs/heads/release" -f sha="$GITHUB_SHA" -F force=false --silent
+          else
+            gh api -X POST "repos/$REPO/git/refs" -f ref=refs/heads/release -f sha="$GITHUB_SHA" --silent
+          fi

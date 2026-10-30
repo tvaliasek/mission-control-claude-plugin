@@ -38,12 +38,22 @@ const send = (res: ServerResponse, status: number, body: unknown) => {
   res.end(JSON.stringify(body));
 };
 
+export interface StubKey {
+  id: number;
+  name: string;
+  key_prefix: string;
+  expires_at: number | null;
+  revoked_at: number | null;
+  last_used_at: number | null;
+}
+
 // Write endpoints, which only the admin key may use.
 const respondAdmin = (
   route: string,
   res: ServerResponse,
   body: Record<string, unknown>,
-  existingAgents: string[]
+  existingAgents: string[],
+  agentKeys: StubKey[]
 ) => {
   if (route === "POST /api/agents/register") {
     const exists = existingAgents.includes(String(body.name));
@@ -56,6 +66,9 @@ const respondAdmin = (
       api_key: ISSUED_KEY,
       key: { id: 3, key_prefix: "mca_abcdef12" },
     });
+  } else if (route === "DELETE /api/agents/7/keys") {
+    const key = agentKeys.find((k) => k.id === body.key_id && !k.revoked_at);
+    send(res, key ? 200 : 404, key ? { success: true } : {});
   } else {
     send(res, 404, {});
   }
@@ -68,7 +81,8 @@ const respond = (
   req: IncomingMessage,
   res: ServerResponse,
   body: Record<string, unknown>,
-  existingAgents: string[]
+  existingAgents: string[],
+  agentKeys: StubKey[]
 ) => {
   const key = req.headers["x-api-key"];
   const route = `${req.method} ${req.url}`;
@@ -81,7 +95,9 @@ const respond = (
     return;
   }
   if (req.method === "GET" && AGENT_KEYS_ROUTE_RE.test(req.url ?? "")) {
-    send(res, key === ADMIN_KEY ? 200 : 403, { keys: [] });
+    send(res, key === ADMIN_KEY ? 200 : 403, {
+      keys: key === ADMIN_KEY ? agentKeys : [],
+    });
     return;
   }
   const lookup = req.method === "GET" && AGENT_ROUTE_RE.exec(req.url ?? "");
@@ -92,16 +108,19 @@ const respond = (
     return;
   }
   if (key === ADMIN_KEY) {
-    respondAdmin(route, res, body, existingAgents);
+    respondAdmin(route, res, body, existingAgents, agentKeys);
   } else {
     send(res, 403, { error: "Forbidden" });
   }
 };
 
 export const startMissionControl = async ({
+  agentKeys = [] as StubKey[],
   existingAgents = [] as string[],
   handler,
 }: {
+  // what GET /api/agents/7/keys lists
+  agentKeys?: StubKey[];
   existingAgents?: string[];
   handler?: Handler;
 } = {}): Promise<MockServer> => {
@@ -121,7 +140,7 @@ export const startMissionControl = async ({
       });
       res.setHeader("Content-Type", "application/json");
       if (!handler?.(req, res)) {
-        respond(req, res, body, existingAgents);
+        respond(req, res, body, existingAgents, agentKeys);
       }
     });
   });
@@ -157,7 +176,7 @@ export interface FakeBin {
 }
 
 // Fake `claude` / `copilot` executables that record every call. `exitCodes` maps a
-// space-joined argv prefix to an exit code (default 0); `outputs` likewise to stderr.
+// space-joined argv prefix to an exit code (default 0); `outputs` likewise to stdout.
 export const fakeBins = (
   commands: string[],
   {
@@ -186,9 +205,10 @@ const done = () => {
     command: ${JSON.stringify(command)}, argv, input,
     sawKeys: "MC_ADMIN_API_KEY" in process.env || "MC_API_KEY" in process.env,
   }) + "\\n");
-  const outputs = ${JSON.stringify(outputs)};
+  // like a real claude with nothing registered, unless a test says otherwise
+  const outputs = ${JSON.stringify({ "claude plugin marketplace list --json": "[]", ...outputs })};
   const out = pick(outputs);
-  if (out) process.stderr.write(outputs[out]);
+  if (out) process.stdout.write(outputs[out]);
   const codes = ${JSON.stringify(exitCodes)};
   const code = pick(codes);
   process.exit(code ? codes[code] : 0);

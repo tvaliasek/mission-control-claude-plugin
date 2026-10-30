@@ -28,6 +28,18 @@ const NO_ESCAPE = 0;
 const AFTER_ESC = 1;
 const IN_SEQUENCE = 2;
 const SEQUENCE_END_RE = /[A-Za-z~]/u;
+// What stopping at a question (input ended, invalid answer) means: before the key
+// is saved, the setup is aborted; once it is saved, only the questions after it are.
+let abort = {
+    code: 1,
+    outcome: "setup aborted"
+};
+const setAbort = (code, outcome)=>{
+    abort = {
+        code,
+        outcome
+    };
+};
 const abortInput = (stdin, code, message)=>{
     stdin.setRawMode(false);
     process.stderr.write("\n");
@@ -53,7 +65,7 @@ const applyChar = (stdin, state, ch, echo)=>{
         abortInput(stdin, SIGINT_EXIT_CODE);
     }
     if (ch === "\u0004") {
-        abortInput(stdin, 1, "input ended; setup aborted");
+        abortInput(stdin, abort.code, `input ended; ${abort.outcome}`);
     }
     if (ch === "\u001B") {
         state.escape = AFTER_ESC;
@@ -104,7 +116,7 @@ const readLine = async (stdin, echo)=>{
             return state.input.join("");
         }
     }
-    return abortInput(stdin, 1, "input ended; setup aborted");
+    return abortInput(stdin, abort.code, `input ended; ${abort.outcome}`);
 };
 const promptTerminal = async (question, echo)=>{
     const { stdin } = process;
@@ -156,7 +168,8 @@ const createPrompter = async ()=>{
         }
         if (answer !== "y" && answer !== "yes" && answer !== "n" && answer !== "no") {
             // not echoed: an out-of-step piped line could be anything, e.g. a key
-            return cli_fail("answer y or n");
+            cli_log(`answer y or n; ${abort.outcome}`);
+            return process.exit(abort.code);
         }
         return answer.startsWith("y");
     };
@@ -171,7 +184,8 @@ const guardUnfinished = ()=>{
     let finished = false;
     process.on("beforeExit", ()=>{
         if (!finished) {
-            cli_fail("input ended before setup finished");
+            cli_log(`input ended; ${abort.outcome}`);
+            process.exit(abort.code);
         }
     });
     return ()=>{
@@ -181,11 +195,23 @@ const guardUnfinished = ()=>{
 
 ;// CONCATENATED MODULE: external "node:child_process"
 const external_node_child_process_namespaceObject = require("node:child_process");
+;// CONCATENATED MODULE: external "node:fs"
+const external_node_fs_namespaceObject = require("node:fs");
+;// CONCATENATED MODULE: external "node:path"
+const external_node_path_namespaceObject = require("node:path");
 ;// CONCATENATED MODULE: ./src/lib/clients.ts
 
 
+
+
+
 const MARKETPLACE_REPO = "tvaliasek/mission-control-claude-plugin";
-const PLUGIN_ID = "mission-control@mission-control";
+const MARKETPLACE_NAME = "mission-control";
+// The release workflow fast-forwards this branch to each published tag, so installs
+// get releases through plugin updates and never unreleased commits from master.
+const MARKETPLACE_REF = "release";
+const PINNED_SOURCE = `${MARKETPLACE_REPO}#${MARKETPLACE_REF}`;
+const PLUGIN_ID = `mission-control@${MARKETPLACE_NAME}`;
 // marketplace add clones a git repository, so allow for a slow network
 const CLIENT_TIMEOUT_MS = 300000;
 // Runs a client CLI without passing on keys from our own environment.
@@ -211,17 +237,21 @@ const run = (command, args, input)=>{
         return {
             error: `could not run ${command}: ${code ?? result.error.message}`,
             ok: false,
-            output: ""
+            output: "",
+            stdout: ""
         };
     }
-    const output = `${result.stdout}${result.stderr}`.trim();
+    const { stdout } = result;
+    const output = `${stdout}${result.stderr}`.trim();
     return result.status === 0 ? {
         ok: true,
-        output
+        output,
+        stdout
     } : {
         error: `${command} ${args.slice(0, 2).join(" ")} exited with ${result.status}`,
         ok: false,
-        output
+        output,
+        stdout
     };
 };
 const isInstalled = (command)=>run(command, [
@@ -243,35 +273,90 @@ const configureClaude = (values)=>step(run("claude", [
         PLUGIN_ID,
         "--values-stdin"
     ], JSON.stringify(values)), `configured ${PLUGIN_ID} in Claude Code`);
-const installClaude = ()=>step(run("claude", [
+const ALREADY_REGISTERED_RE = /already registered/u;
+const EXTRA_KNOWN_RE = /extraKnownMarketplaces/u;
+const removeCommand = (client)=>`${client} plugin marketplace remove ${MARKETPLACE_NAME}${client === "copilot" ? " --force" : ""}`;
+const claudeMarketplace = ()=>{
+    const listed = run("claude", [
         "plugin",
         "marketplace",
-        "add",
-        MARKETPLACE_REPO
-    ]), "Claude Code: marketplace added") ?? step(run("claude", [
+        "list",
+        "--json"
+    ]);
+    try {
+        const entries = JSON.parse(listed.stdout);
+        return entries.find((entry)=>entry.name === MARKETPLACE_NAME);
+    } catch  {
+        return null;
+    }
+};
+// Copilot's marketplace list doesn't show the ref; its settings file does.
+const copilotMarketplace = ()=>{
+    const home = process.env.COPILOT_HOME || path.join(homedir(), ".copilot");
+    let text;
+    try {
+        text = readFileSync(path.join(home, "settings.json"), "utf-8");
+    } catch (error) {
+        return error.code === "ENOENT" ? undefined : null;
+    }
+    try {
+        const settings = JSON.parse(text);
+        return settings.extraKnownMarketplaces?.[MARKETPLACE_NAME]?.source;
+    } catch  {
+        // e.g. comments, which Copilot accepts
+        return null;
+    }
+};
+// Registers the marketplace on the release branch. A marketplace that is already
+// registered is left as it is: moving it to another ref takes remove + add, which
+// uninstalls the plugin and, in Claude Code, deletes its saved settings and key.
+const addMarketplace = (client, name, registered)=>{
+    if (registered === null && client === "claude") {
+        // add could re-point a foreign marketplace of that name and keep its plugin
+        return `${name}: could not read "claude plugin marketplace list --json"; update Claude Code and run this setup again`;
+    }
+    if (registered === undefined || registered === null) {
+        const added = run(client, [
+            "plugin",
+            "marketplace",
+            "add",
+            PINNED_SOURCE
+        ]);
+        // Copilot fails when it is registered already, e.g. where its settings didn't say so;
+        // any other failure may be a foreign source of that name, so it stops the setup
+        if (!added.ok && ALREADY_REGISTERED_RE.test(added.output)) {
+            log(`${name}: the marketplace is registered already; continuing with it`);
+            return null;
+        }
+        const error = step(added, registered === undefined ? `${name}: marketplace added (${MARKETPLACE_REF} branch)` : `${name}: marketplace registered (could not check which branch it follows)`);
+        // Claude refuses a source other than the one its settings declare for that name
+        return error && client === "claude" && EXTRA_KNOWN_RE.test(added.output) ? `${error}\n${name}: edit or delete the ${MARKETPLACE_NAME} entry of extraKnownMarketplaces in your Claude Code user settings (settings.json in ~/.claude or $CLAUDE_CONFIG_DIR), then run this setup again; an entry in managed settings needs whoever manages them` : error;
+    }
+    if (typeof registered.repo !== "string") {
+        // a git URL or a directory: its plugin would get the agent key, so don't guess
+        return `${name}: the ${MARKETPLACE_NAME} marketplace is registered from a source other than ${MARKETPLACE_REPO}; remove it first`;
+    }
+    // GitHub names are case-insensitive
+    if (registered.repo.toLowerCase() !== MARKETPLACE_REPO) {
+        return `${name}: a different marketplace named ${MARKETPLACE_NAME} is registered (${registered.repo}); remove it first`;
+    }
+    if (registered.ref === MARKETPLACE_REF) {
+        log(`${name}: marketplace already follows the ${MARKETPLACE_REF} branch`);
+        return null;
+    }
+    log(`${name}: the marketplace follows ${typeof registered.ref === "string" ? registered.ref : "the default branch"}, not ${MARKETPLACE_REF}, so it can get unreleased changes. To follow releases, remove it (${removeCommand(client)}; this also removes the plugin and its settings) and run this setup again`);
+    return null;
+};
+const installClaude = ()=>addMarketplace("claude", "Claude Code", claudeMarketplace()) ?? step(run("claude", [
         "plugin",
         "install",
         PLUGIN_ID
     ]), "Claude Code: plugin installed");
-const ALREADY_REGISTERED_RE = /already registered/u;
-const installCopilot = ()=>{
-    const added = run("copilot", [
-        "plugin",
-        "marketplace",
-        "add",
-        MARKETPLACE_REPO
-    ]);
-    // unlike claude, copilot fails when the marketplace is already registered
-    const marketplace = added.ok || ALREADY_REGISTERED_RE.test(added.output) ? {
-        ok: true,
-        output: added.output
-    } : added;
-    return step(marketplace, "Copilot CLI: marketplace added") ?? step(run("copilot", [
+const installCopilot = ()=>addMarketplace("copilot", "Copilot CLI", copilotMarketplace()) ?? step(run("copilot", [
         "plugin",
         "install",
         PLUGIN_ID
     ]), "Copilot CLI: plugin installed");
-};
 
 ;// CONCATENATED MODULE: ./src/lib/mission-control.ts
 
@@ -293,7 +378,8 @@ const DAY_MS = 86400000;
 // server text must not drive the terminal or change what it shows
 const CONTROL_CHARS_RE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
 // Text from the server, made safe to print.
-const printable = (value)=>String(value).replaceAll(CONTROL_CHARS_RE, "?");
+// only primitives: String() runs an object's own toString, which a server controls
+const printable = (value)=>(typeof value === "object" && value !== null ? "?" : String(value)).replaceAll(CONTROL_CHARS_RE, "?");
 // names that read as a number (e.g. 42, 1e3) are rejected because Mission Control
 // resolves them as agent ids
 const isValidAgentName = (name)=>NAME_RE.test(name) && Number.isNaN(Number(name));
@@ -353,8 +439,10 @@ const isRemotePlainHttp = (url)=>{
     const parsed = new URL(url);
     return parsed.protocol === "http:" && !LOCAL_HOSTS.has(parsed.hostname);
 };
-const api = async (baseUrl, apiKey, method, route, body, agentName)=>{
+// One request; a network failure comes back as a reason instead of exiting.
+const send = async (baseUrl, apiKey, method, route, body, agentName)=>{
     let res;
+    let text;
     try {
         res = await fetch(`${baseUrl}${route}`, {
             body: body === undefined ? undefined : JSON.stringify(body),
@@ -372,16 +460,20 @@ const api = async (baseUrl, apiKey, method, route, body, agentName)=>{
             redirect: "error",
             signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
         });
+        // inside the try: the body can still fail to arrive (reset, timeout)
+        text = await res.text();
     } catch (error) {
         // fetch error messages can contain header values, so report only the cause code
         const err = error ?? {};
-        const reason = err.cause?.message === "unexpected redirect" ? "the server answered with a redirect, which is not followed so the key goes only to this URL" : err.cause?.code ?? err.name ?? "network error";
-        return cli_fail(`${method} ${route} failed: ${reason}`);
+        return err.cause?.message === "unexpected redirect" ? "the server answered with a redirect, which is not followed so the key goes only to this URL" : err.cause?.code ?? err.name ?? "network error";
     }
-    const text = await res.text();
     let data = {};
     try {
-        data = JSON.parse(text);
+        const parsed = JSON.parse(text);
+        // null, arrays and plain values carry no fields
+        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+            data = parsed;
+        }
     } catch  {
     // non-JSON body: keep the status only
     }
@@ -391,10 +483,17 @@ const api = async (baseUrl, apiKey, method, route, body, agentName)=>{
         status: res.status
     };
 };
+const api = async (...args)=>{
+    const result = await send(...args);
+    if (typeof result === "string") {
+        return cli_fail(`${args[2]} ${args[3]} failed: ${result}`);
+    }
+    return result;
+};
+const errorOf = (result)=>typeof result.data.error === "string" ? ` ${printable(result.data.error)}` : "";
 const checked = (method, route, result)=>{
     if (!result.ok) {
-        const detail = typeof result.data.error === "string" ? ` ${printable(result.data.error)}` : "";
-        cli_fail(`${method} ${route} failed: HTTP ${result.status}${detail}`);
+        cli_fail(`${method} ${route} failed: HTTP ${result.status}${errorOf(result)}`);
     }
     return result.data;
 };
@@ -411,22 +510,29 @@ const enrollAgent = async (opts)=>{
     const agentRoute = `/api/agents/${encodeURIComponent(opts.agent)}`;
     const lookup = await api(opts.url, opts.adminKey, "GET", agentRoute);
     let agentId;
-    if (lookup.status === HTTP_NOT_FOUND) {
+    let existed = lookup.status !== HTTP_NOT_FOUND;
+    if (existed) {
+        // not registered again: that would reset a working agent's status to idle
+        agentId = agentIdOf(checked("GET", agentRoute, lookup), opts.agent, agentRoute);
+    } else {
         const registerRoute = "/api/agents/register";
         const reg = checked("POST", registerRoute, await api(opts.url, opts.adminKey, "POST", registerRoute, {
             framework: opts.framework,
             name: opts.agent
         }));
         agentId = agentIdOf(reg, opts.agent, registerRoute);
-        cli_log(`agent "${opts.agent}" registered (id ${printable(agentId)})`);
-    } else {
-        const existing = checked("GET", agentRoute, lookup);
+        // an existing name is answered with that agent and registered: false, e.g. when
+        // another run registered it after the lookup; only an explicit true counts as new,
+        // since a new agent skips both the takeover question and earlier-key revocation
+        existed = reg.registered !== true;
+    }
+    if (existed) {
         if (!await opts.allowExisting()) {
             cli_fail(`agent "${opts.agent}" already exists; not issuing it another key${opts.existingHint}`);
         }
-        // not registered again: that would reset a working agent's status to idle
-        agentId = agentIdOf(existing, opts.agent, agentRoute);
         cli_log(`agent "${opts.agent}" exists (id ${printable(agentId)})`);
+    } else {
+        cli_log(`agent "${opts.agent}" registered (id ${printable(agentId)})`);
     }
     // operator is the lowest role that can connect, heartbeat, poll the queue and update tasks
     const keysRoute = `/api/agents/${encodeURIComponent(agentId)}/keys`;
@@ -440,8 +546,78 @@ const enrollAgent = async (opts)=>{
     const expires = new Date(Date.now() + opts.expiresDays * DAY_MS);
     // logged first, so a key refused below can still be found and revoked by its id
     cli_log(`issued key ${printable(issued.key?.key_prefix ?? "")}… (id ${printable(issued.key?.id ?? "?")}), expires on ${expires.toISOString().slice(0, 10)}; issue a new one before then`);
-    // it is printed into shell export lines and saved as a header value
-    return checkKey(issued.api_key, "issued key");
+    return {
+        agentId,
+        // it is printed into shell export lines and saved as a header value
+        apiKey: checkKey(issued.api_key, "issued key"),
+        existed,
+        keyId: typeof issued.key?.id === "number" ? issued.key.id : undefined
+    };
+};
+const dateOf = (seconds)=>{
+    if (typeof seconds !== "number") {
+        return "never";
+    }
+    const date = new Date(seconds * 1000);
+    // toISOString throws on a date out of range
+    return Number.isNaN(date.getTime()) ? "?" : date.toISOString().slice(0, 10);
+};
+// Revokes the agent's other active keys, after confirm() agrees. Run it only once the
+// new key is saved: other machines sharing this agent name lose access. A key that
+// can't be revoked is reported and skipped, since the new key is already in use.
+const revokeOtherKeys = async (url, adminKey, issued, confirm)=>{
+    // resolves false when a revocation that may be needed did not happen
+    if (!issued.existed) {
+        return true;
+    }
+    const { keyId } = issued;
+    if (keyId === undefined) {
+        cli_log("the new key's id is unknown, so earlier keys are not revoked");
+        return false;
+    }
+    const route = `/api/agents/${encodeURIComponent(issued.agentId)}/keys`;
+    // the new key is saved already, so a failure here is only a warning
+    const listed = await send(url, adminKey, "GET", route);
+    if (typeof listed === "string" || !listed.ok) {
+        const reason = typeof listed === "string" ? listed : `HTTP ${listed.status}${errorOf(listed)}`;
+        cli_log(`warning: could not list earlier keys, none revoked: ${reason}`);
+        return false;
+    }
+    const { keys } = listed.data;
+    // every entry needs a numeric id, or an active key could be skipped unnoticed
+    if (!(Array.isArray(keys) && keys.every((key)=>typeof key === "object" && key !== null && typeof key.id === "number"))) {
+        cli_log("warning: unexpected answer listing earlier keys, none revoked");
+        return false;
+    }
+    const now = Date.now() / 1000;
+    const others = keys.filter((key)=>key.id !== keyId && (key.revoked_at === null || key.revoked_at === undefined) && (typeof key.expires_at !== "number" || key.expires_at > now));
+    if (others.length === 0) {
+        return true;
+    }
+    cli_log(`other active keys of this agent:`);
+    for (const key of others){
+        cli_log(`  ${printable(key.key_prefix ?? "")}… "${printable(key.name ?? "")}" (id ${printable(key.id)}), last used ${dateOf(key.last_used_at)}`);
+    }
+    if (!await confirm(others.length)) {
+        cli_log("earlier keys left active");
+        return true;
+    }
+    let allRevoked = true;
+    // one at a time, so the log always says which keys were revoked
+    for (const key of others){
+        // oxlint-disable-next-line no-await-in-loop
+        const result = await send(url, adminKey, "DELETE", route, {
+            key_id: key.id
+        });
+        if (typeof result === "string" || !result.ok) {
+            const reason = typeof result === "string" ? result : `HTTP ${result.status}${errorOf(result)}`;
+            cli_log(`warning: key id ${printable(key.id)} not revoked: ${reason}`);
+            allRevoked = false;
+        } else {
+            cli_log(`revoked key id ${printable(key.id)}`);
+        }
+    }
+    return allRevoked;
 };
 // Checks that the key is an agent key of this agent: Mission Control rejects an
 // agent key whose agent differs from x-agent-name, and only an admin key can list
@@ -480,6 +656,8 @@ const verifyKey = async (url, key, agent)=>{
    --key-name NAME      Label for the issued key (default: this hostname)
    --expires-days N     Key lifetime in days, 1-3650 (default: 90)
    --existing           Allow issuing a key for an agent that already exists
+   --revoke-old         Revoke the agent's other active keys once the new key is saved
+                        (not with --print)
    --print              Print the agent key instead of configuring the local plugin
    --allow-http         Allow a plain-HTTP URL to another machine (keys unencrypted)
 
@@ -503,7 +681,8 @@ const parseArgs = (argv)=>{
         existing: false,
         expiresDays: DEFAULT_EXPIRES_DAYS,
         keyName: (0,external_node_os_namespaceObject.hostname)(),
-        print: false
+        print: false,
+        revokeOld: false
     };
     for(let i = 0; i < argv.length; i += 1){
         const arg = argv[i];
@@ -542,6 +721,11 @@ const parseArgs = (argv)=>{
                     opts.existing = true;
                     break;
                 }
+            case "--revoke-old":
+                {
+                    opts.revokeOld = true;
+                    break;
+                }
             case "--print":
                 {
                     opts.print = true;
@@ -555,7 +739,7 @@ const parseArgs = (argv)=>{
             case "-h":
             case "--help":
                 {
-                    process.stdout.write("Usage: node mc-enroll.cjs --url URL --agent NAME [--key-name NAME] [--expires-days N] [--existing] [--print] [--allow-http]\n");
+                    process.stdout.write("Usage: node mc-enroll.cjs --url URL --agent NAME [--key-name NAME] [--expires-days N] [--existing] [--revoke-old] [--print] [--allow-http]\n");
                     process.exit(0);
                     break;
                 }
@@ -587,8 +771,12 @@ const parseArgs = (argv)=>{
 const main = async ()=>{
     setProgram("mc-enroll");
     const opts = parseArgs(process.argv.slice(2));
+    if (opts.print && opts.revokeOld) {
+        // a printed key is not in use yet; revoking now would cut the agent off until it is
+        cli_fail("--revoke-old can't be used with --print: revoke on the agent machine, where the new key is saved first");
+    }
     const adminKey = checkKey(envKey("MC_ADMIN_API_KEY", opts.url) ?? await promptHidden("Mission Control admin API key: ", "MC_ADMIN_API_KEY and MC_URL"), "admin API key");
-    const agentKey = await enrollAgent({
+    const issued = await enrollAgent({
         adminKey,
         agent: opts.agent,
         allowExisting: ()=>Promise.resolve(opts.existing),
@@ -598,6 +786,7 @@ const main = async ()=>{
         keyName: opts.keyName,
         url: opts.url
     });
+    const agentKey = issued.apiKey;
     if (opts.print) {
         process.stdout.write(`${agentKey}\n`);
         return;
@@ -615,6 +804,14 @@ const main = async ()=>{
         return;
     }
     cli_log(`start a new Claude Code session to use ${PLUGIN_ID}`);
+    if (isRemotePlainHttp(opts.url)) {
+        cli_log(`the plugin refuses plain HTTP unless MC_ALLOW_HTTP=${new URL(opts.url).host} is set in the environment claude starts from`);
+    }
+    // only now that the new key is saved; exit 2 (not 1, which means the key is on
+    // stdout) tells a script that old keys may be active
+    if (opts.revokeOld && !await revokeOtherKeys(opts.url, adminKey, issued, ()=>Promise.resolve(true))) {
+        process.exitCode = 2;
+    }
 };
 const mc_enroll_finished = guardUnfinished();
 main().then(mc_enroll_finished).catch(failUnexpected);
