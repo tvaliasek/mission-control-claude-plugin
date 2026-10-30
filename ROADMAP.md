@@ -5,6 +5,7 @@
 - TypeScript toolchain: TypeScript 6, Ultracite (Oxlint + Oxfmt), Rstest, Rslib build of `mc-enroll` into one readable, committed `.cjs`. CI checks that the committed output matches a fresh build.
 - Daily check for new Mission Control releases and moved release tags (`.github/workflows/upstream.yml`); vendoring is done by hand in a reviewed pull request (`npm run vendor -- vX.Y.Z`).
 - Interactive setup: `npx @tvaliasek/mission-control-claude-plugin`, released to npm with provenance by `.github/workflows/release.yml` (the first version is published manually).
+- Installs follow the `release` branch, which the release workflow moves to each published tag; setup offers to revoke an agent's earlier keys (`mc-enroll --revoke-old`); the plugin refuses plain HTTP to another machine unless `MC_ALLOW_HTTP` names that host.
 - GitHub Copilot CLI support: the launcher falls back to `MC_URL` / `MC_API_KEY` from the environment because Copilot has no plugin configuration (verified with Copilot CLI 1.0.103).
 
 ## Ideas

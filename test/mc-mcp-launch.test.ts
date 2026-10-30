@@ -231,6 +231,30 @@ describe("mc-mcp-launch", () => {
     expect(`${r.stdout}${r.stderr}`).not.toContain("SECRETVALUE");
   });
 
+  test("refuses a plain-HTTP URL to another machine unless MC_ALLOW_HTTP names its host", async () => {
+    const env = { ...CLAUDE_CODE_ENV, MC_URL: "http://mc.invalid" };
+    const refused = await callTool(env, "mc_list_agents");
+    expect(refused.code).toBe(1);
+    expect(refused.stdout).toBe("");
+    expect(refused.stderr).toMatch(/plain HTTP.*MC_ALLOW_HTTP=mc\.invalid /u);
+
+    // an opt-in for another host does not count
+    const otherHost = await callTool(
+      { ...env, MC_ALLOW_HTTP: "other.invalid" },
+      "mc_list_agents"
+    );
+    expect(otherHost.code).toBe(1);
+    expect(otherHost.stderr).toMatch(/plain HTTP/u);
+
+    // allowed: the server starts and answers (with a network error for .invalid)
+    const allowed = await callTool(
+      { ...env, MC_ALLOW_HTTP: "MC.invalid" },
+      "mc_list_agents"
+    );
+    expect(allowed.stderr).not.toMatch(/plain HTTP/u);
+    expect(allowed.stdout.split("\n").filter(Boolean)).toHaveLength(2);
+  });
+
   test("exits with instructions when neither source provides values", async () => {
     const r = await callTool(
       { ...COPILOT_ENV, MC_API_KEY_FALLBACK: "", MC_URL_FALLBACK: "" },

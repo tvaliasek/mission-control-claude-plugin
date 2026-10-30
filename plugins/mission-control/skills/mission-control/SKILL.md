@@ -35,3 +35,4 @@ For work the user wants tracked as a run, call `mc_create_run` with `agent_id`, 
 - `HTTP 401` / `403`: the API key is wrong or lacks the needed scope. Tell the user to check the plugin configuration (`/plugin` → Mission Control → configure) and to enter an agent-scoped key there, not the server's admin `API_KEY`; do not try other credentials.
 - `Mission Control URL ...` errors: the configured URL is not a valid absolute HTTP(S) URL.
 - `Mission Control answered with a redirect ...`: redirects are refused so the key is not sent elsewhere. Tell the user to set the configured URL to the address it redirects to (for example `https://` instead of `http://`).
+- No `mc_*` tools at all: the MCP server did not start. Tell the user to check `/mcp`; one cause is a plain-HTTP URL to another machine, which the plugin refuses unless `MC_ALLOW_HTTP` is set to that host where the client starts.

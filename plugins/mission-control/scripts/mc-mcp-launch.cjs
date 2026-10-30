@@ -60,8 +60,29 @@ const settings = pick(process.env.MC_URL, process.env.MC_API_KEY) ?? pick(proces
 // Printable ASCII only: fetch rejects anything else with an error that contains the
 // key, and the server would return that error to the model as tool output.
 const KEY_RE = /^[!-~]+$/u;
+const LOCAL_HOSTS = new Set([
+    "localhost",
+    "127.0.0.1",
+    "[::1]"
+]);
+// Plain HTTP to another machine would send the key unencrypted. MC_ALLOW_HTTP set to
+// that host (host:port as in the URL) opts in for that host only. Returns the refused
+// host, or undefined.
+const refusedPlainHttpHost = (url)=>{
+    let parsed;
+    try {
+        parsed = new URL(url.trim());
+    } catch  {
+        // the server reports an invalid URL itself
+        return;
+    }
+    const allowed = process.env.MC_ALLOW_HTTP?.trim().toLowerCase();
+    return parsed.protocol === "http:" && !LOCAL_HOSTS.has(parsed.hostname) && allowed !== parsed.host ? parsed.host : undefined;
+};
 delete process.env.MC_URL_FALLBACK;
 delete process.env.MC_API_KEY_FALLBACK;
+const refusedHost = settings && refusedPlainHttpHost(settings.url);
+delete process.env.MC_ALLOW_HTTP;
 // Mission Control checks a session cookie before the API key, so an MC_COOKIE left in
 // the shell by mc-cli would make the agent act as that logged-in user.
 delete process.env.MC_COOKIE;
@@ -86,6 +107,9 @@ globalThis.fetch = async (input, init)=>{
 };
 if (settings && !KEY_RE.test(settings.apiKey)) {
     process.stderr.write("mission-control: the Mission Control API key contains invalid characters; set it again\n");
+    process.exitCode = 1;
+} else if (refusedHost) {
+    process.stderr.write(`mission-control: the Mission Control URL uses plain HTTP to another machine, which would send the API key unencrypted; use an HTTPS URL, or set MC_ALLOW_HTTP=${refusedHost} in the environment claude or copilot starts from to allow it for that host\n`);
     process.exitCode = 1;
 } else if (settings) {
     process.env.MC_URL = settings.url;
