@@ -177,7 +177,7 @@ const main = async () => {
   // a released tag now pointing elsewhere is a possible upstream compromise
   if (tag === current.tag && sha !== current.commit) {
     throw new Error(
-      `${tag} resolves to ${sha} upstream, but upstream.json has ${current.commit}. If upstream moved the tag, check it before taking it; to take it, set that commit in upstream.json, run npm run vendor and bump the plugin version (see README)`
+      `${tag} resolves to ${sha} upstream, but upstream.json has ${current.commit}. If upstream moved the tag, check it before taking it; to take it, set that commit in upstream.json, run npm run vendor and bump the plugin version (see docs/development.md)`
     );
   }
 
